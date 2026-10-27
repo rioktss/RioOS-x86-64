@@ -1,0 +1,39 @@
+#ifndef MMU_H
+#define MMU_H
+
+#include "types.h"
+
+
+#define MMU_PAGE_SIZE        4096ULL
+#ifdef MYKERNEL_X86_64
+/* Keep the reserved user window below the current framebuffer reservation. */
+#define MMU_USER_BASE        0x07000000ULL
+#define MMU_USER_LIMIT       0x07700000ULL
+#define MMU_USER_STACK_BASE  0x07700000ULL
+#define MMU_USER_STACK_TOP   0x07800000ULL
+#else
+#define MMU_USER_BASE        0x47000000ULL
+#define MMU_USER_LIMIT       0x47800000ULL
+#define MMU_USER_STACK_BASE  0x47F00000ULL
+#define MMU_USER_STACK_TOP   0x48000000ULL
+#endif
+
+/* Permission bits accepted by mmu_user_set_range(). */
+#define MMU_USER_READ  1U
+#define MMU_USER_WRITE 2U
+#define MMU_USER_EXEC  4U
+
+void mmu_init();
+int mmu_enabled();
+uint64_t mmu_read_sctlr();
+uint64_t mmu_read_ttbr0();
+uint64_t mmu_read_tcr();
+void mmu_status();
+
+int mmu_user_prepare();
+int mmu_user_set_range(uint64_t start, uint64_t end, uint32_t flags);
+int mmu_user_finish();
+int mmu_user_pointer_ok(uint64_t address, uint64_t length, int write);
+uint64_t mmu_user_stack_top();
+
+#endif

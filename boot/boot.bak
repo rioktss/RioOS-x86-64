@@ -1,0 +1,246 @@
+.section .text.boot, "ax"
+.align  4
+
+.global _start
+.type _start, %function
+
+.extern kernel_main
+.extern __bss_start
+.extern __bss_end
+.extern stack_top
+.extern boot_dtb_ptr
+
+/*
+ * MyKernel AArch64 bootstrap
+ *
+ * Target:
+ *   QEMU virt
+ *   AArch64 / ARMv8-A
+ *   PL011 UART at 0x09000000
+ *
+ * Boot protocol:
+ *   x2 = physical address of the Device Tree Blob (DTB)
+ *        when entered through the standard AArch64 Linux boot protocol.
+ *
+ * Important:
+ *   The bootstrap does not assume that the DTB is located at
+ *   0x40000000. That address is normally the beginning of RAM.
+ */
+
+/* ============================================================
+ * EARLY ENTRY
+ * ============================================================ */
+
+_start:
+    /*
+     * Preserve the incoming DTB address before using registers
+     * and clearing BSS.
+     */
+    mov     x27, x2
+
+    /*
+     * Early diagnostic:
+     * Write 'B' directly to the PL011 UART data register.
+     *
+     * UART base = 0x09000000
+     * UART DR   = base + 0x00
+     */
+    mov     x9, #0x09000000
+    mov     w10, #'B'
+    str     w10, [x9]
+
+    /*
+     * Initialize the bootstrap stack.
+     */
+    ldr     x0, =stack_top
+    mov     sp, x0
+
+    /*
+     * Mask exceptions during early initialization.
+     * Interrupts must remain masked until the kernel has
+     * initialized its exception vectors and interrupt handlers.
+     */
+    msr     daifset, #0xf
+    isb
+
+/* ============================================================
+ * CLEAR BSS
+ * ============================================================ */
+
+    ldr     x1, =__bss_start
+    ldr     x2, =__bss_end
+
+clear_bss:
+    cmp     x1, x2
+    b.hs    bss_done
+
+    /*
+     * Byte stores avoid overrunning the end of BSS if the
+     * linker symbols are not aligned to an 8-byte boundary.
+     */
+    strb    wzr, [x1], #1
+    b       clear_bss
+
+bss_done:
+    /*
+     * Restore the saved DTB pointer into the global variable.
+     * The variable itself may have been cleared as part of BSS.
+     */
+    ldr     x0, =boot_dtb_ptr
+    str     x27, [x0]
+
+/* ============================================================
+ * DETECT CURRENT EXCEPTION LEVEL
+ * ============================================================ */
+
+    mrs     x0, CurrentEL
+    lsr     x0, x0, #2
+    and     x0, x0, #3
+
+    cmp     x0, #2
+    b.eq    boot_drop_el2
+
+    cmp     x0, #1
+    b.eq    boot_el1
+
+    /*
+     * EL3 or an unsupported exception level.
+     * This bootstrap supports EL1 and EL2 entry.
+     */
+    b       boot_hang
+
+/* ============================================================
+ * DROP FROM EL2 TO EL1
+ * ============================================================ */
+
+boot_drop_el2:
+    /*
+     * Permit EL1 access to the physical and virtual
+     * generic timer counters.
+     *
+     * CNTHCTL_EL2:
+     *   bit 0 = EL1 physical counter access
+     *   bit 1 = EL1 virtual counter access
+     */
+    mov     x1, #3
+    msr     cnthctl_el2, x1
+
+    /*
+     * Ensure EL1 uses AArch64.
+     * HCR_EL2.RW = bit 31.
+     */
+    mov     x1, #0x80000000
+    msr     hcr_el2, x1
+
+    /*
+     * Do not trap FP/SIMD instructions at EL2.
+     * CPTR_EL2.TFP is bit 10.
+     */
+    mrs     x1, cptr_el2
+    bic     x1, x1, #(1 << 10)
+    msr     cptr_el2, x1
+
+    /*
+     * Initialize the EL1 stack before changing exception level.
+     */
+    ldr     x1, =stack_top
+    msr     sp_el1, x1
+
+    /*
+     * Set the return address to boot_el1.
+     */
+    ldr     x1, =boot_el1
+    msr     elr_el2, x1
+
+    /*
+     * Return into EL1h:
+     *   M[3:0] = 0101 (EL1h)
+     *   DAIF   = 1111 (masked during initialization)
+     */
+    mov     x1, #0x3C5
+    msr     spsr_el2, x1
+
+    isb
+    eret
+
+/* ============================================================
+ * EL1 INITIALIZATION
+ * ============================================================ */
+
+boot_el1:
+    /*
+     * Select SP_EL1.
+     */
+    mov     x1, #1
+    msr     spsel, x1
+    isb
+
+    /*
+     * Enable FP/SIMD access at EL1.
+     *
+     * CPACR_EL1.FPEN = bits 21:20 = 11
+     *
+     * This prevents EL1 FP/SIMD instructions from trapping
+     * solely because CPACR_EL1.FPEN is disabled.
+     */
+    mrs     x1, cpacr_el1
+    mov     x2, #0x300000
+    orr     x1, x1, x2
+    msr     cpacr_el1, x1
+    isb
+
+    /*
+     * Keep IRQs and other exceptions masked until kernel_main()
+     * has initialized the exception vectors and interrupt system.
+     */
+    msr     daifset, #0xf
+    isb
+
+    /*
+     * Second diagnostic:
+     * Write 'E' to confirm execution reached EL1.
+     */
+    mov     x9, #0x09000000
+    mov     w10, #'E'
+    str     w10, [x9]
+
+    /*
+     * Pass the saved DTB pointer to kernel_main in x0.
+     *
+     * If kernel_main has no parameters, the extra register
+     * value is harmless under the AArch64 procedure-call ABI.
+     */
+    mov     x0, x27
+    bl      kernel_main
+
+/* ============================================================
+ * FALLBACK HALT
+ * ============================================================ */
+
+boot_hang:
+    /*
+     * Reaching this label means kernel_main returned or the
+     * bootstrap detected an unsupported exception level.
+     *
+     * WFE is only a fallback here. It does not initialize
+     * a timer or enable interrupts.
+     */
+    wfe
+    b       boot_hang
+
+.size _start, . - _start
+
+/* ============================================================
+ * BOOTSTRAP STACK
+ * ============================================================ */
+
+.section .stack, "aw", %nobits
+.align  12
+
+stack:
+    .skip   16384
+
+.global stack_top
+.type stack_top, %object
+
+stack_top:
