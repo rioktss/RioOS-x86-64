@@ -143,9 +143,14 @@ uart_puts(
     "\r\n"
 );
 
-/* Start UI and shell after enabling the periodic PIT IRQ. If shell returns,
-   keep the CPU in an interruptible idle loop so IRQ0 can wake it. */
+/* Start either the graphical UI or the plain command shell.
+   Text-only builds are useful for terminal-first Live USB images and serial
+   console testing. The default build preserves the existing graphical UI. */
+#ifndef RIOOS_TEXT_ONLY
 ui_start();
+#else
+    uart_puts("Text-only mode enabled; graphical UI skipped.\r\n");
+#endif
 shell();
 
     while (1)

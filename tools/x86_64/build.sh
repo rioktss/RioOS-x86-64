@@ -64,6 +64,10 @@ CXXFLAGS=(--target=x86_64-unknown-none-elf -Iinclude -DMYKERNEL_X86_64=1
     -ffreestanding -fno-exceptions -fno-rtti -fno-stack-protector -fno-builtin
     -fno-pic -fno-pie -fno-unwind-tables -fno-asynchronous-unwind-tables
     -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-80387 -mcmodel=small -nostdinc++ -std=c++17 -O1 -Wall -Wextra -Werror)
+if [[ "${RIOOS_TEXT_ONLY:-0}" == "1" ]]; then
+    CXXFLAGS+=(-DRIOOS_TEXT_ONLY=1)
+    printf 'Build mode: text-only shell (graphical UI disabled).\n'
+fi
 ASMFLAGS=(--target=x86_64-unknown-none-elf -Iinclude -ffreestanding -fno-pic -fno-pie -mno-red-zone)
 log() { [[ "$VERBOSE" -eq 1 ]] && printf '%s\n' "$*" || true; }
 compile_cpp() {
