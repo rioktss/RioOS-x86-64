@@ -1,12 +1,30 @@
-# Build and run MyKernel x86-64
+# Build and Run RioOS
 
-## Requirements
+This guide explains how to build RioOS, boot it in QEMU, and troubleshoot common environment problems.
 
-Build with `clang`, `clang++`, `ld.lld`, and Python 3. To start the system, install `qemu-system-x86_64`. A graphical display backend is required for the terminal-window and pixel-UI modes. Normal QEMU boot does not require GRUB or an ISO.
+RioOS is a bare-metal x86-64 project. Your host operating system provides the compiler, build tools, and QEMU; the kernel itself runs as the guest software.
 
-Check tools:
+## 1. Requirements
 
-```sh
+The build expects these commands to be available in `PATH`:
+
+```text
+clang
+clang++
+ld.lld
+python3 (or python)
+qemu-system-x86_64
+```
+
+The compiler must support:
+
+```text
+--target=x86_64-unknown-none-elf
+```
+
+Check your environment:
+
+```bash
 clang --version
 clang++ --version
 ld.lld --version
@@ -14,64 +32,324 @@ python3 --version
 qemu-system-x86_64 --version
 ```
 
-## Build
+## 2. Clone the repository
 
-Choose the script for the host environment and run it from the repository root (or use the path as shown from any working directory):
-
-```sh
-bash linux/build.sh --clean --verbose
-# Android/Termux: bash termux/build.sh --clean
-# macOS:         bash macos/build.sh --clean
-# Windows:       .\windows\build.ps1 --clean
+```bash
+git clone https://github.com/rioktss/RioOS.git
+cd RioOS
 ```
 
-Bash scripts support `--clean`, `--verbose`/`-v`, `--skip-tests`, `--run`, and `--help`. The build runs native host tests and `tests/verify_x86_64.py` by default. `--skip-tests` skips those checks. `build-x86_64.sh` remains as a compatibility alias inside the Bash platform folders.
+## 3. Linux / WSL
 
-Generated files are in `build-x86_64/`: `kernel.elf` is the x86-64 kernel, `qemu-boot.elf` is the ELF32 Multiboot wrapper used by QEMU's PC loader, `kernel.bin` is the flattened load payload, and user programs are under `build-x86_64/user/`. The first build creates and seeds `storage/disk.img` (16 MiB). That disk persists between runs; back it up before deleting or regenerating it.
+Linux and WSL use the scripts in `linux/`. From the repository root:
 
-## Headless serial shell
+```bash
+chmod +x linux/*.sh
+./linux/build.sh
+./linux/run.sh
+```
 
-```sh
+Build and immediately boot the serial/headless runner:
+
+```bash
+./linux/build.sh --run
+```
+
+For the shell in a QEMU window (mouse-wheel scrollback), use `./linux/run-terminal.sh`.
+
+## 4. Arch Linux
+
+Install the main dependencies:
+
+```bash
+sudo pacman -Syu
+sudo pacman -S clang lld python qemu-desktop
+```
+
+Then build:
+
+```bash
+bash linux/build.sh
 bash linux/run.sh
 ```
 
-The QEMU PC machine uses one `qemu64` CPU, 128 MiB RAM by default, a COM1 serial console, an IDE disk, and PCI VirtIO networking. Override settings through environment variables, for example:
+## 5. Debian / Ubuntu
 
-```sh
-RIOOS_MEM=256M RIOOS_ACCEL=tcg bash linux/run.sh
+Install the equivalent LLVM/Clang, LLD, Python 3, and QEMU packages provided by your distribution.
+
+Verify:
+
+```bash
+clang --version
+clang++ --version
+ld.lld --version
+python3 --version
+qemu-system-x86_64 --version
 ```
 
-## Black text-console window
+Then:
 
-```sh
-bash linux/run-terminal.sh
+```bash
+chmod +x linux/*.sh
+./linux/build.sh
+./linux/run.sh
 ```
 
-This starts QEMU with VGA disabled and places the original serial shell in a separate black text-console window. It is **not** the pixel UI's Terminal app. Use `RIOOS_DISPLAY=sdl` or another backend supported by your QEMU build if the default is unavailable.
+## 6. Termux / Android
 
-## Graphical pixel UI
+Termux can be used as a development host when the required compiler, linker, Python, and QEMU packages are available in the user's environment.
 
-```sh
-bash linux/run-ui.sh
-# or
-RIOOS_DISPLAY=sdl bash linux/run-ui.sh
+After installing the dependencies:
+
+```bash
+clang --version
+clang++ --version
+ld.lld --version
+python3 --version
+qemu-system-x86_64 --version
 ```
 
-The UI uses QEMU standard VGA / Bochs VBE, keyboard input, and a PS/2 mouse cursor. Navigate with arrow keys, WASD, Enter/click, depending on the screen. On Linux a graphical session (`DISPLAY` or `WAYLAND_DISPLAY`) is required for GTK/SDL. macOS wrappers default to Cocoa, and Termux wrappers default to SDL.
+Then run the Termux-specific entry points:
 
-## Optional ISO
-
-```sh
-bash linux/make-x86_64-iso.sh
+```bash
+bash termux/build.sh
+bash termux/run.sh
 ```
 
-The helper requires `grub-mkrescue` and `xorriso`. This is optional; direct QEMU boot does not require them.
+For the shell window, use `bash termux/run-terminal.sh`. Start Termux:X11 first for graphical windows and use a QEMU build with SDL or GTK support. If QEMU cannot access the expected acceleration features on a particular Android device, software emulation may still be possible but can be slower or unavailable depending on the Termux/QEMU build.
 
-## Validation
+## 7. macOS
 
-```sh
-bash linux/build.sh --clean
-python3 tests/verify_x86_64.py
+Use the scripts in `macos/`. Ensure that the installed LLVM/Clang supports `--target=x86_64-unknown-none-elf`, and install Python 3 and QEMU. The macOS window runners default to QEMU's `cocoa` backend; set `RIOOS_DISPLAY=sdl` if your QEMU build uses SDL instead.
+
+```bash
+bash macos/build.sh
+bash macos/run.sh
+bash macos/run-terminal.sh
 ```
 
-The structural verifier checks x86-64 ELF headers, the i386 Multiboot wrapper, user ELFs, and the generated disk image. It does not replace a runtime boot test on the target QEMU build/device.
+## 8. Windows PowerShell
+
+Install LLVM/Clang, LLD, Python 3, and QEMU. Ensure their executable directories are available in `PATH`.
+
+Build:
+
+```powershell
+.\windows\build.ps1
+```
+
+Build and run:
+
+```powershell
+.\windows\build.ps1 --run
+```
+
+Run separately:
+
+```powershell
+.\windows\run.ps1
+```
+
+Optional:
+
+```powershell
+.\windows\build.ps1 --verbose
+.\windows\build.ps1 --clean
+```
+
+## 9. QEMU configuration
+
+The default Unix and PowerShell runners use these important settings:
+
+```text
+Machine       : pc (accel=tcg)
+CPU           : qemu64
+Memory        : 128M
+Console       : nographic (serial), -vga none
+Kernel        : build/qemu-boot.elf (Multiboot wrapper around build/kernel.elf)
+Disk          : storage/disk.img (ATA/IDE)
+Network       : virtio-net-pci (legacy) + user networking
+```
+
+The source of truth is the runner script itself:
+
+- [`linux/run.sh`](../linux/run.sh)
+- [`windows/run.ps1`](../windows/run.ps1)
+
+To open the RioOS shell in a QEMU window, use `linux/run-terminal.sh` on Linux/WSL, `termux/run-terminal.sh` on Termux:X11, `macos/run-terminal.sh` on macOS, or `windows/run-terminal.ps1` in PowerShell. Linux and Termux can select SDL with `RIOOS_DISPLAY=sdl` when GTK is unavailable; macOS defaults to Cocoa and can select SDL. The window uses the standard VGA device (`-vga std`) and the PS/2 keyboard/mouse; the GTK runner adds `grab-on-hover=on` so the mouse wheel works as soon as the pointer is over the window. The `run` script stays the serial-console option in the host terminal.
+
+## 10. Build outputs
+
+After a successful build, the important generated files are:
+
+```text
+build/kernel.elf
+build/user_init.elf
+build/nano.elf
+build/calc.elf
+storage/disk.img
+```
+
+Not every optional userspace artifact is guaranteed to exist in every future revision; consult `linux/build.sh` for the current build flow.
+
+## 11. Environment overrides
+
+The build scripts support tool overrides through environment variables.
+
+Example:
+
+```bash
+CLANG=/path/to/clang \
+CXX=/path/to/clang++ \
+LD=/path/to/ld.lld \
+QEMU=/path/to/qemu-system-x86_64 \
+./linux/build.sh
+```
+
+The QEMU runners also support:
+
+```bash
+RIOOS_MEM=128M
+RIOOS_ACCEL=tcg
+```
+
+Example:
+
+```bash
+RIOOS_MEM=256M RIOOS_ACCEL=kvm ./linux/run.sh
+```
+
+## 12. What the build script does
+
+At a high level, `linux/build.sh` performs these stages:
+
+```text
+1. Build userspace programs
+2. Build the host filesystem formatter/tools
+3. Prepare storage/disk.img
+4. Compile boot and exception entry code
+5. Compile the kernel modules
+6. Link build/kernel.elf and wrap it as build/qemu-boot.elf (Multiboot)
+7. Inspect/verify the kernel ELF
+8. Run host-side tests
+9. Run release verification
+```
+
+The build intentionally separates host tools/tests from the freestanding x86-64 kernel.
+
+## 13. First boot
+
+When QEMU starts, RioOS uses the serial console. A typical boot ends at an interactive shell prompt similar to:
+
+```text
+MyKernel initialization complete.
+Welcome to MyKernel!
+Type 'help' to get started.
+
+[home@RioOS ]$
+```
+
+Start with:
+
+```text
+help
+version
+mem
+ls
+pwd
+ps
+sched
+```
+
+The available command set may change as RioOS evolves.
+
+## 14. Troubleshooting
+
+### `qemu-system-x86_64: command not found`
+
+Install QEMU for your platform or point `QEMU` at the executable:
+
+```bash
+QEMU=/custom/path/qemu-system-x86_64 ./linux/run.sh
+```
+
+### `clang: command not found`
+
+Install LLVM/Clang and make sure `clang` and `clang++` are in `PATH`.
+
+### `ld.lld: command not found`
+
+Install the LLVM LLD package and verify:
+
+```bash
+ld.lld --version
+```
+
+### `build/kernel.elf not found`
+
+Run the build first:
+
+```bash
+./linux/build.sh
+```
+
+### `storage/disk.img not found`
+
+Run the build first. The build system creates and prepares the persistent disk image when needed.
+
+### Build succeeds but QEMU behaves differently
+
+QEMU version, host platform, terminal handling, and acceleration support can affect runtime behaviour. Compare your environment against the QEMU configuration documented above and reproduce the problem from a clean build when possible.
+
+## 15. Cleaning generated output
+
+On Unix-like systems:
+
+```bash
+./linux/build.sh --clean
+```
+
+On Windows:
+
+```powershell
+.\windows\build.ps1 --clean
+```
+
+Cleaning removes generated build/test artifacts; it is separate from the source tree.
+
+## P0 hardening release
+
+The 1.6.1 build includes process-manager and logical scheduler regression tests, stricter ELF load-segment/page-permission validation, and syscall pointer-scan overflow guards. Review [P0_HARDENING.md](./P0_HARDENING.md) for verified scope and known scheduler limits.
+
+
+## P1 descriptor and pipes release (v1.7.0)
+
+Version 1.7.0 adds process-PID-scoped descriptor tables, shared open-file descriptions for `dup`/`dup2`, and a bounded non-blocking kernel pipe syscall. Run `bash linux/build.sh` to execute the new host regressions. See [P1_FD_PIPES.md](./P1_FD_PIPES.md) for behavior and limitations. This does not add `fork()`/`wait()` or concurrent ring 3 process execution; the 100 Hz timer IRQ is active at boot.
+
+## P2 filesystem and permissions (v1.8.0)
+
+The filesystem persists owner UID/GID in unused inode metadata bytes and migrates older images without changing their inode size. Standard user identity is UID/GID `1000`; root is UID/GID `0`. The development root password is `123` (embedded demo credential; not production security).
+
+New commands: `stat <path>`, `chown <uid> <gid> <path>` (root only), and `truncate <path> <size>` (up to 262144 bytes; extension is zero-filled). `chmod` now requires file ownership or root. File reads/writes, parent-directory mutations, path traversal, and ELF execution check mode bits. `diskread`, `diskwrite`, and `diskflush` require root.
+
+P2 userspace syscall helpers are `user_fs_stat`, `user_fs_truncate`, and `user_fs_chmod` in `include/user_api.h`. Run `bash linux/build.sh --clean` to rebuild and execute filesystem permission/migration and syscall regression tests. The kernel still uses a single global shell credential context, so this is educational access control rather than a hardened multi-user security boundary. Timer IRQ stays off at boot.
+
+## P3 networking (UDP/DNS and outbound TCP)
+
+The networking stack retains owner-PID-scoped UDP handles, IPv4/UDP validation, DNS A-record queries and their ring 3 syscall helpers, and adds four bounded outbound TCP client sockets with ACK-based send, receive buffering, close handling, and userspace syscall helpers. The `httpget <hostname> [path]` command fetches up to 4096 bytes from a **plain HTTP** service on port 80. The default DNS address is `10.0.2.3` for QEMU user-mode networking. HTTPS/TLS is not implemented. See [P3 networking notes](./P3_NETWORKING.md) for API use and limits.
+
+Run `bash linux/build.sh --clean` for the x86-64 clean build and host regressions. On a machine with `qemu-system-x86_64`, run `net`, `ping 10.0.2.2`, `nslookup example.com`, and `httpget neverssl.com /`. Host tests use a fake NIC/peer and are not a replacement for the real QEMU runtime test. DHCP, IPv6, IP fragment reassembly, full TCP congestion/reassembly, and TLS remain out of scope; the 100 Hz timer IRQ stays active.
+
+
+## P4 SMP/driver foundations (v1.10.0)
+
+Run `bash linux/build.sh --clean` (or `.\windows\build.ps1 --clean` in PowerShell) to build the new SMP and framebuffer host regressions alongside the existing suite. The host suite includes the SMP, console and networking tests; the release check (`tests/verify_x86_64.py`) verifies the x86-64 build artifacts and sources.
+
+After launching QEMU on a host with `qemu-system-x86_64`, try `smp` and `fbinfo`. `smp` should report one online CPU and disabled SMP. `fbinfo` reports the framebuffer terminal state.
+
+
+## Terminal window and timer IRQ (v1.13.0)
+
+`run.sh` / `run.ps1` start RioOS in the host terminal. `run-terminal.sh` / `run-terminal.ps1` start it in a QEMU window (GTK or SDL; Cocoa on macOS) with `-vga std` and PS/2 input: the kernel draws the shell with a DejaVu Sans Mono terminal font and you scroll history with the mouse wheel (or PageUp/PageDown). There is no GUI, launcher or `.rpk` package any more. Details: [TERMINAL.md](./TERMINAL.md).
+
+The timer IRQ is active (100 Hz) at boot and while ring 3 programs run: try `irq status` and `irq selftest`. Details: [TIMER_IRQ.md](./TIMER_IRQ.md).

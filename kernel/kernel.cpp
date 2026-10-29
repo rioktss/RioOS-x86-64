@@ -18,7 +18,8 @@
 #include "security.h"
 #include "smp.h"
 #include "version.h"
-#include "ui.h"
+#include "fb.h"
+#include "console.h"
 
 #ifdef MYKERNEL_X86_64
 extern "C" void x86_uart_init();
@@ -83,7 +84,7 @@ extern "C" void kernel_main()
     /* The counter is needed by every timeout path, so bring it up early. */
     uart_puts("[4] Initializing timer...\r\n");
     timer_init();
-    /* Timer starts OFF. Login/authentication never starts timer IRQs. */
+    /* Timer is armed after the interrupt controller is up (step 15). */
 
     uart_puts("[5] Initializing MMU...\r\n");
     mmu_init();
@@ -114,7 +115,7 @@ extern "C" void kernel_main()
     uart_puts("[12] Initializing scheduler...\r\n");
     scheduler_init();
     thread_init();
-    uart_puts("Cooperative thread subsystem initialized (timer preemption remains off).\r\n");
+    uart_puts("Cooperative thread subsystem initialized (no preemption; timer tick only).\r\n");
 
     uart_puts("[13] Initializing interrupt controller...\r\n");
     interrupt_init();
@@ -122,41 +123,42 @@ extern "C" void kernel_main()
     uart_puts("[14] Initializing syscall...\r\n");
     syscall_init();
 
-    /* Start a low-rate PIT tick before entering the shell. The PIC IRQ0 line
-       and CPU interrupt flag must both be enabled; otherwise the idle path's
-       HLT can never wake and the kernel appears frozen. */
-#ifdef MYKERNEL_X86_64
-    timer_set_sched_tick(0);
-    timer_start_periodic(100U);
+    /* System tick: 100 Hz periodic timer IRQ, live for the kernel shell and
+       while EL0 programs run. Line is unmasked at the GIC first, then the
+       timer is armed, then the CPU I-bit is cleared. */
+    uart_puts("[15] Starting timer IRQ (100 Hz system tick)...\r\n");
+    timer_set_sched_tick(1);
     interrupt_timer_line_enable();
+    timer_start_periodic(100U);
     interrupt_enable();
-    uart_puts("[15] PIT IRQ0 enabled at 100 Hz; CPU interrupts enabled.\r\n");
-#else
-    uart_puts("[15] Timer IRQ prepared (off by default; use 'irq' to test stages B-D).\r\n");
-#endif
+    uart_puts("Timer IRQ active: CPU IRQ unmasked, tick = 100 Hz.\r\n");
 
 uart_puts(
     "\r\n"
     "RioOS initialization complete.\r\n"
+    "\r\n"
+);
+
+/* If QEMU provides a display (run-terminal.sh), take over the framebuffer
+       with the text terminal. Everything printed from here on is mirrored to
+       the window; without a display the serial console works unchanged. */
+fb_init();
+if (fb_has_display() && console_start() == 0)
+    uart_puts_serial_only("Console: framebuffer terminal active (mouse wheel / Shift+PageUp scroll).\r\n");
+uart_puts(
     "Welcome to RioOS!\r\n"
     "Type 'help' to get started.\r\n"
     "\r\n"
 );
 
-/* Start either the graphical UI or the plain command shell.
-   Text-only builds are useful for terminal-first Live USB images and serial
-   console testing. The default build preserves the existing graphical UI. */
-#ifndef RIOOS_TEXT_ONLY
-ui_start();
-#else
-    uart_puts("Text-only mode enabled; graphical UI skipped.\r\n");
-#endif
 shell();
 
     while (1)
+    {
 #ifdef MYKERNEL_X86_64
         asm volatile("sti; hlt" ::: "memory");
 #else
         asm volatile("wfe");
 #endif
+    }
 }

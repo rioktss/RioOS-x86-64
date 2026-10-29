@@ -1,37 +1,152 @@
-# x86-64 MyKernel development guide
+# RioOS Development Guide
+
+This guide describes a development workflow that keeps RioOS understandable and reduces the chance of breaking unrelated subsystems.
 
 ## Development principles
 
-Make small changes that keep hardware assumptions explicit. Kernel code runs freestanding with a small custom runtime; it does not have the normal C++ standard library or host OS services. Changes that affect boot, memory, IRQs, the IDE disk, VBE framebuffer, or syscall ABI should be isolated and documented.
+### 1. Make small, traceable changes
 
-## Build and verification
+A kernel bug can cross multiple layers. Prefer small commits such as:
 
-```sh
-bash linux/build-x86_64.sh --clean --verbose
-python3 tests/verify_x86_64.py
+```text
+fix: validate VFS path before recursive remove
+feat: add host regression test for scheduler policy
+
+docs: explain ELF userspace flow
 ```
 
-The build compiles the architecture-specific assembly and C++ backend, links the ELF64 kernel, creates a flat kernel payload and links the ELF32 Multiboot wrapper. The structural verifier checks the machine IDs, Multiboot header, generated disk, and expected source set. The verifier is not a runtime emulator and cannot prove the kernel will boot on every QEMU build.
+### 2. Keep the source tree intact
 
-## Runtime test loop
+RioOS is intentionally split into subsystems. Avoid moving or deleting source files unless the change itself requires a structural refactor.
 
-```sh
-bash linux/run.sh       # serial shell
-bash linux/run-ui.sh    # graphical VGA/VBE UI, from a desktop session
+### 3. Test at the lowest useful layer
+
+If a bug can be reproduced by a host-side test, write or update that test before debugging QEMU runtime behaviour.
+
+### 4. Document architectural assumptions
+
+Examples:
+
+- expected CPU/target
+- exception-level assumptions
+- QEMU device assumptions
+- filesystem on-disk expectations
+- userspace ABI assumptions
+
+## Build pipeline
+
+`linux/build.sh` currently follows this sequence:
+
+```text
+userspace
+   ↓
+host tools
+   ↓
+storage image
+   ↓
+boot assembly
+   ↓
+kernel compilation
+   ↓
+linking
+   ↓
+ELF verification
+   ↓
+host tests
+   ↓
+release verification
 ```
 
-Capture the entire serial log when investigating a failure. Decide whether it occurs during boot, memory setup, device init, input, filesystem access, graphics, or shell dispatch. Rebuild cleanly and rerun the structural verifier after changes. On a host with QEMU, also verify the real boot and relevant device behavior; the current source build has not been runtime-verified in the build environment.
+A successful source change should preserve this pipeline.
 
-## Current architecture assumptions
+## Host tests
 
-- Target triple: `x86_64-unknown-none-elf`; Multiboot v1 ELF32 shim starts the real ELF64 kernel at 1 MiB.
-- Bootstrap identity maps the first 4 GiB with 2 MiB pages.
-- Serial console is COM1; keyboard is polled PS/2.
-- Persistent storage uses primary-master ATA PIO on the QEMU PC machine.
-- Graphics uses QEMU standard VGA / Bochs VBE, not the AArch64 `ramfb` path.
-- PIC IRQs are masked during ordinary boot; timer mode defaults to OFF.
-- SMP startup/APIC are not implemented (single CPU). Ring-3 execution, syscall entry and virtio-net PCI networking are implemented.
+The repository contains focused host-side tests for several areas:
 
-## Host-side tests
+```text
+tests/fs_host_test.cpp
+tests/vfs_host_test.cpp
+tests/net_host_test.cpp
+tests/mem_host_test.cpp
+tests/syscall_host_test.cpp
+tests/diag_host_test.cpp
+tests/sched_host_test.cpp
+tests/env_host_test.cpp
+tests/fd_host_test.cpp
+```
 
-The `tests/` directory retains shared subsystem regression tests. The default x86 build intentionally does not claim that all legacy AArch64-oriented host tests passed. `tests/TEST_MATRIX.md` separates checks actually automated from runtime checks that still need QEMU.
+These tests do not replace QEMU testing. They make fast subsystem-level regression checks possible.
+
+## Release verification
+
+`tests/verify_release.py` performs static/release checks around the kernel image and release artifacts.
+
+The repository's test matrix documents which checks are automated and which still need an actual Termux/QEMU or other runtime host.
+
+See [`../tests/TEST_MATRIX.md`](../tests/TEST_MATRIX.md).
+
+## Debugging workflow
+
+When a new feature breaks boot:
+
+```text
+1. Reproduce from a clean build
+2. Capture the complete serial log
+3. Decide whether the failure is build-time or runtime
+4. Narrow it to boot / memory / interrupt / driver / process / userspace
+5. Add diagnostics or a regression test
+6. Fix the smallest layer that owns the bug
+7. Re-run host tests
+8. Re-run QEMU runtime checks
+```
+
+Avoid changing multiple unrelated kernel subsystems at the same time. Bare-metal bugs can otherwise become difficult to localize.
+
+## Safe documentation-first contributions
+
+People who are new to OS development can contribute without changing kernel behaviour:
+
+- README improvements
+- architecture diagrams
+- setup instructions
+- troubleshooting notes
+- test documentation
+- explanations of source files
+
+These are real engineering contributions and make the repository more useful globally.
+
+## Coding expectations
+
+The existing build treats compiler warnings seriously and uses strict freestanding flags for the kernel. Preserve the current warning discipline and target settings unless the change explicitly requires otherwise.
+
+For kernel C++ code, remember that normal desktop assumptions do not apply. The kernel is built without a host C++ runtime and with freestanding restrictions.
+
+## Pull requests
+
+A useful pull request should explain:
+
+```text
+Problem
+------
+What was wrong?
+
+Change
+------
+What was changed?
+
+Validation
+----------
+Which host tests passed?
+Did QEMU boot?
+What runtime checks were performed?
+
+Compatibility
+-------------
+Does the change affect the on-disk format, userspace ABI, or QEMU assumptions?
+```
+
+## Documentation rule
+
+When a feature changes user-visible behaviour, update the relevant documentation in the same change.
+
+The goal is simple: **the repository should explain how it works, not only contain code that works.**

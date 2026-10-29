@@ -1,6 +1,9 @@
 # RioOS file-descriptor API — v1.7.0
 
-The shared kernel contains a bounded, Unix-inspired descriptor implementation. In this x86-64 port the ring-3/syscall entry path is not complete, so the userspace wrappers below document the intended ABI and should not be treated as runnable from a user program yet.
+> **v1.13.0 note:** the timer IRQ is now active (100 Hz tick, also while ring 3 programs run) and the GUI was removed. Statements below that say the timer IRQ is disabled/off describe the earlier version this document was written for; see [TIMER_IRQ.md](./TIMER_IRQ.md) and [TERMINAL.md](./TERMINAL.md).
+
+
+RioOS provides a bounded descriptor API for ring 3 userspace. It is a small Unix-inspired interface, not a complete POSIX implementation.
 
 ## Operations
 
@@ -19,7 +22,7 @@ Open flags are in `include/user_api.h` and prefixed with `USER_FD_`: `O_RDONLY`,
 
 ## Per-process ownership
 
-The kernel API gives each active process PID its own descriptor table, with descriptor slots `0`, `1`, and `2` initially assigned to stdin, stdout, and stderr. A descriptor in one process table is not valid merely because the same number exists in another table. In the original user runner, tables are released when the synchronous program returns; x86-64 user execution is not yet enabled. RioOS does not yet support concurrent user processes or descriptor inheritance through `fork()`; those features depend on independent process address spaces and saved CPU contexts.
+Each active process PID gets its own descriptor table, with descriptor slots `0`, `1`, and `2` initially assigned to stdin, stdout, and stderr. A descriptor in one process table is not valid merely because the same number exists in another table. Tables are released when the synchronous ring 3 program returns. RioOS does not yet support concurrent user processes or descriptor inheritance through `fork()`; those features depend on independent process address spaces and saved CPU contexts.
 
 `dup` and `dup2` reference the same open-file description, so file offset changes through one duplicate are visible through the others. `dup2` closes the target descriptor first when necessary, and supports replacing descriptors `0`, `1`, or `2` for redirection-style use.
 
@@ -70,4 +73,4 @@ Because pipes are non-blocking, a read can return `-11` when no bytes are ready.
 
 ## Validation
 
-The shared descriptor implementation is compiled into the x86-64 kernel and reachable from ring-3 programs through the `syscall` instruction (see docs/X86_64_PORT.md). Build and verify with `bash linux/build.sh --clean`.
+Run `bash linux/build.sh` to clean-build the x86-64 kernel and run host tests. The expanded host tests cover per-PID descriptor isolation, shared offsets via `dup`/`dup2`, pipe data transfer, non-blocking empty reads, EOF, `EPIPE`, and syscall argument validation. A successful host build does not replace an interactive QEMU boot test. Timer IRQ remains off by default.

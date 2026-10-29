@@ -1,50 +1,54 @@
-# MyKernel x86-64 port notes
+# RioOS x86-64 notes (v1.13.0)
 
-This source tree is intentionally trimmed to the x86-64 target. Architecture-specific implementations live in `arch/x86_64/`; shared kernel, VFS, shell, file-descriptor, UI, and app code remains in the common directories. AArch64 boot code, AArch64-only drivers, user binaries, and Windows scripts for the removed target are not included.
+The x86-64 tree has the same folder layout and feature set as the AArch64 tree
+(`linux/ macos/ termux/ windows/`, `boot/ drivers/ kernel/ memory/ process/ fs/
+net/ storage/ tests/ userspace/ docs/ tools/`). Only the architecture-specific
+files differ.
 
 ## Boot chain
 
-1. `linux/build-x86_64.sh` compiles a freestanding ELF64 kernel for `x86_64-unknown-none-elf`.
-2. It flattens the kernel's loadable ELF segments at physical address `0x00100000`.
-3. It embeds the flat payload in `arch/x86_64/qemu_multiboot32.S`, which is linked as an ELF32 Multiboot v1 wrapper.
-4. QEMU's PC `-kernel` loader loads the wrapper. The wrapper copies the real kernel payload to 1 MiB and jumps to its 32-bit bootstrap.
-5. `arch/x86_64/boot.S` initializes page tables, identity-maps the first 4 GiB with 2 MiB pages, enables long mode, and calls `kernel_main`.
+1. `linux/build.sh` compiles a freestanding ELF64 kernel (`x86_64-unknown-none-elf`).
+2. `tools/make_boot_image.py` flattens its PT_LOAD segments at `0x00100000` (`build/kernel.bin`).
+3. `boot/qemu_multiboot32.S` embeds that payload in an ELF32 Multiboot v1 wrapper (`build/qemu-boot.elf`).
+4. QEMU's `-kernel` loader starts the wrapper, which copies the payload to 1 MiB and jumps to `boot/boot.S`.
+5. `boot/boot.S` builds page tables (first 4 GiB identity-mapped with 2 MiB pages), enters long mode and calls `kernel_main`.
 
-This method requires no GRUB ISO. It assumes the bootstrap and initial devices remain within the first 4 GiB identity mapping.
+## Where the x86-64 specific code lives
 
-## Build and test
+| File | Role |
+|---|---|
+| `boot/boot.S`, `boot/linker.ld`, `boot/exceptions.S` | long-mode bootstrap, link layout, exception/IRQ stubs |
+| `boot/qemu_multiboot32.{S,ld}` | Multiboot v1 ELF32 wrapper |
+| `kernel/gdt.cpp` | GDT, TSS, `EFER.SCE`, `STAR/LSTAR/SFMASK` (SYSCALL) |
+| `kernel/exceptions.cpp` | IDT, CPU exception handling (ring 3 faults end only the program) |
+| `kernel/interrupt.cpp`, `kernel/timer.cpp` | 8259 PIC, 8254 PIT 100 Hz tick, TSC clock, `interrupt_idle()` (`hlt`) |
+| `kernel/rtc.cpp` | CMOS RTC |
+| `memory/mmu.cpp` | paging, per-process page tables (PML4/PDPT/PD + four 4 KiB tables) |
+| `process/user_entry.S`, `process/ctx_switch.S` | ring 3 entry/exit (`iretq`, `syscall/sysretq`), kernel-thread switch |
+| `drivers/uart.cpp` | COM1 serial; mirrors output to the framebuffer console |
+| `drivers/fb.cpp` | Bochs/QEMU VBE linear framebuffer found over PCI (1024x768x32) |
+| `drivers/console*.cpp` | framebuffer text terminal (shared with the AArch64 tree) |
+| `drivers/keyboard.cpp` | PS/2 keyboard, IntelliMouse wheel, PageUp/PageDown scrolling |
+| `drivers/storage.cpp` | ATA PIO primary master |
+| `drivers/virtio_net.cpp` | legacy virtio-net over PCI I/O space, polled |
 
-```sh
-bash linux/build-x86_64.sh --clean --verbose
-python3 tests/verify_x86_64.py
-bash linux/run.sh
-```
+## User address space
 
-The build script checks that `kernel.elf` is ELF64/EM_X86_64, that the wrapper is ELF32/i386, and that a Multiboot v1 marker exists in the wrapper's first 8 KiB. The Python verifier performs a second structural/source sanity check. These checks are **not** a substitute for an actual QEMU boot. QEMU was not available in the environment used to prepare this ZIP, so runtime status remains unverified.
+User window `0x07000000-0x07700000`, 64 KiB stack `0x077F0000-0x07800000`, guard
+pages below it. Each process owns private page tables and physical frames (from
+the page allocator); everything outside the window is shared with the kernel
+identity map. `exec` activates the process CR3 and restores the boot CR3 when the
+program returns. Segments are U/W/NX per 4 KiB page; W+X is refused.
 
-## Native platform backends
+## Run modes
 
-| Subsystem | x86-64 implementation | Status / limits |
-|---|---|---|
-| Console | COM1 UART polling | Implemented |
-| Input | One PS/2 decoder for keyboard + mouse into an event queue | Ctrl+letter = 1..26, arrows = 0x80..0x83, relative mouse integrated into absolute 0..32767 pointer, software cursor in `fb.cpp` |
-| Storage | Primary-master ATA PIO | QEMU `if=ide`; not AHCI/NVMe |
-| Clock | CMOS RTC; TSC monotonic time | TSC frequency from CPUID 0x15/0x16, else calibrated against PIT channel 2 |
-| Graphics | PCI VGA BAR + Bochs/QEMU VBE LFB | QEMU standard VGA |
-| Exceptions | IDT gates 0-31 plus PIC vectors 32-47 | Ring-3 faults terminate the user program only |
-| IRQs | 8259 PIC remap | Masked by default; spurious IRQ7/15 handled; no APIC |
-| Timer | PIT ch0 IRQ0, TSC timing | Keeps running (IF=1) while ring-3 programs run; syscalls run with IF=0 |
-| SMP | single-CPU stub and spinlocks | SMP startup disabled |
-| Network | virtio-net PCI legacy (I/O BAR0), polled | Needs `-device virtio-net-pci,disable-modern=on` (run scripts add it) |
-| Userspace | ring 3 via `iretq`/`syscall`/`sysretq` | See below |
+- `linux/run.sh` - serial shell in the host terminal (`-nographic -vga none`).
+- `linux/run-terminal.sh` - shell in a QEMU window (`-vga std`, GTK `grab-on-hover=on`).
 
-## Ring 3 design
+## Verification status
 
-- `arch/x86_64/gdt.cpp`: final GDT (0x08/0x10 kernel, 0x20 user data, 0x28 user code64), TSS, `EFER.SCE`, `STAR/LSTAR/SFMASK`.
-- `arch/x86_64/user_entry.S`: `user_enter` parks callee-saved registers on the kernel stack (also `TSS.RSP0` and the syscall stack), then `iretq` to ring 3 with IF=1. `x86_syscall_entry` builds an `ExceptionFrame` (args in `x[0..5]`, number in `x[8]`) for the shared `syscall_dispatch`; `SYS_EXIT` and fatal faults return through `user_exit_return`.
-- `arch/x86_64/mmu.cpp`: the 4 covering 2 MiB PDEs of the user window `0x07000000-0x07800000` are swapped for 4 KiB page tables (U/W/NX per page) while a program runs and restored afterwards. Pointer checks mirror the AArch64 `mmu_user_pointer_ok`.
-- User programs: `userspace/{user_init.S,nano.cpp,calc.cpp}`, linked at `0x07000000` with `userspace/user_init.ld`.
-
-## Testing
-
-`bash linux/build.sh` builds, runs 15 host unit tests and `tests/verify_x86_64.py`. A real `qemu-system-x86_64` boot is still recommended.
+Host tests (all `tests/*_host_test.cpp`) and `tests/verify_x86_64.py` run in
+`linux/build.sh`. The kernel was booted and exercised on a purpose-written
+x86-64 emulator (shell, file commands, `nano`, `calc`, ring 3 faults, per-process
+page tables, timer IRQ in ring 3, networking, scrollback by PageUp/PageDown and
+IntelliMouse wheel). Test with real QEMU: `bash linux/run-terminal.sh`.

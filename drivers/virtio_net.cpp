@@ -1,308 +1,203 @@
-#include "virtio_net.h"
-#include "virtio_mmio.h"
+#include "net_device.h"
 #include "uart.h"
 #include "timer.h"
 
-#define V_MAGIC                 0x000
-#define V_VERSION               0x004
-#define V_DEVICE_ID             0x008
-#define V_DEVICE_FEATURES       0x010
-#define V_DEVICE_FEATURES_SEL   0x014
-#define V_DRIVER_FEATURES       0x020
-#define V_DRIVER_FEATURES_SEL   0x024
-#define V_QUEUE_SEL             0x030
-#define V_QUEUE_NUM_MAX         0x034
-#define V_QUEUE_NUM              0x038
-#define V_QUEUE_READY            0x044
-#define V_QUEUE_NOTIFY           0x050
-#define V_STATUS                 0x070
-#define V_QUEUE_DESC_LOW         0x080
-#define V_QUEUE_DESC_HIGH        0x084
-#define V_QUEUE_DRIVER_LOW       0x090
-#define V_QUEUE_DRIVER_HIGH      0x094
-#define V_QUEUE_DEVICE_LOW       0x0A0
-#define V_QUEUE_DEVICE_HIGH      0x0A4
-#define V_CONFIG                 0x100
+/* Legacy (transitional) virtio-net over PCI I/O space, polled. QEMU's default
+   `-device virtio-net-pci` exposes this interface (vendor 1AF4, device 1000). */
+#define VIO_DEVICE_FEATURES 0x00
+#define VIO_GUEST_FEATURES  0x04
+#define VIO_QUEUE_PFN       0x08
+#define VIO_QUEUE_SIZE      0x0C
+#define VIO_QUEUE_SELECT    0x0E
+#define VIO_QUEUE_NOTIFY    0x10
+#define VIO_STATUS          0x12
+#define VIO_ISR             0x13
+#define VIO_CONFIG          0x14
 
-#define VIRTIO_NET_DEVICE_ID     1U
-#define VIRTIO_F_VERSION_1       32U
-#define VIRTIO_NET_F_MAC         5U
-#define STATUS_ACKNOWLEDGE       0x01U
-#define STATUS_DRIVER            0x02U
-#define STATUS_DRIVER_OK         0x04U
-#define STATUS_FEATURES_OK       0x08U
-#define STATUS_FAILED             0x80U
-#define DESC_NEXT                1U
-#define DESC_WRITE               2U
-#define QUEUE_MAX                8U
-/* We do not negotiate VIRTIO_NET_F_MRG_RXBUF, so v1 uses the base 10-byte
-   virtio_net_hdr (not the 12-byte mergeable-RX header). */
-#define NET_HDR_SIZE             10U
-#define RX_BUFFER_SIZE           2048U
-#define TX_BUFFER_SIZE           2048U
-#define REQUEST_TIMEOUT_MS       2000ULL
+#define ST_ACK     0x01U
+#define ST_DRIVER  0x02U
+#define ST_OK      0x04U
+#define ST_FAILED  0x80U
+#define F_MAC      (1U << 5)
+#define DESC_WRITE 2U
 
-struct VirtqDesc { uint64_t addr; uint32_t len; uint16_t flags; uint16_t next; };
-struct VirtqAvail { uint16_t flags; uint16_t idx; uint16_t ring[QUEUE_MAX]; uint16_t used_event; };
-struct VirtqUsedElem { uint32_t id; uint32_t len; };
-struct VirtqUsed { uint16_t flags; uint16_t idx; VirtqUsedElem ring[QUEUE_MAX]; uint16_t avail_event; };
+#define QMAX        256U           /* upper bound of the device's queue size */
+#define RX_BUFS     8U
+#define NET_HDR     10U            /* no MRG_RXBUF negotiated */
+#define BUF_SIZE    2048U
+#define TIMEOUT_MS  2000ULL
 
-static volatile uint32_t* mmio = 0;
-static uint64_t base_addr = 0;
-static int present = 0;
-static int ready = 0;
-static int queue_size = 0;
-static int device_irq = -1;
+struct VqDesc { uint64_t addr; uint32_t len; uint16_t flags; uint16_t next; };
+/* Legacy ring layout: desc[N], avail, pad to 4096, used. Sized for QMAX. */
+struct Vq {
+    VqDesc desc[QMAX];
+    uint16_t avail_flags, avail_idx, avail_ring[QMAX], used_event;
+    uint8_t pad[4096 - ((sizeof(VqDesc) * QMAX + 6 + 2 * QMAX) % 4096)];
+    uint16_t used_flags, used_idx;
+    struct { uint32_t id, len; } used_ring[QMAX];
+    uint16_t avail_event;
+} __attribute__((aligned(4096)));
+
+static_assert(__builtin_offsetof(Vq, used_flags) == 8192, "legacy used ring must start at page boundary");
+static Vq rxq, txq;
+static uint8_t rx_buf[RX_BUFS][BUF_SIZE] __attribute__((aligned(16)));
+static uint8_t tx_buf[BUF_SIZE] __attribute__((aligned(16)));
+
+static uint16_t io_base = 0;
+static int present = 0, ready = 0;
 static uint8_t mac_address[6];
-static uint16_t tx_last_used = 0;
-static uint16_t rx_last_used = 0;
+static uint16_t rx_last = 0, tx_last = 0;
+static uint32_t rx_qsize = 0, tx_qsize = 0;
 
-static VirtqDesc rx_desc[QUEUE_MAX] __attribute__((aligned(16), section(".bss.virtio_net")));
-static VirtqAvail rx_avail __attribute__((aligned(16), section(".bss.virtio_net")));
-static VirtqUsed rx_used __attribute__((aligned(16), section(".bss.virtio_net")));
-static uint8_t rx_buffers[QUEUE_MAX][RX_BUFFER_SIZE] __attribute__((aligned(16), section(".bss.virtio_net")));
+static inline void outb(uint16_t p, uint8_t v) { asm volatile("outb %0, %1" :: "a"(v), "Nd"(p)); }
+static inline void outw(uint16_t p, uint16_t v) { asm volatile("outw %0, %1" :: "a"(v), "Nd"(p)); }
+static inline void outl(uint16_t p, uint32_t v) { asm volatile("outl %0, %1" :: "a"(v), "Nd"(p)); }
+static inline uint8_t inb(uint16_t p) { uint8_t v; asm volatile("inb %1, %0" : "=a"(v) : "Nd"(p)); return v; }
+static inline uint16_t inw(uint16_t p) { uint16_t v; asm volatile("inw %1, %0" : "=a"(v) : "Nd"(p)); return v; }
+static inline uint32_t inl(uint16_t p) { uint32_t v; asm volatile("inl %1, %0" : "=a"(v) : "Nd"(p)); return v; }
+static inline void barrier() { asm volatile("" ::: "memory"); }
 
-static VirtqDesc tx_desc[1] __attribute__((aligned(16), section(".bss.virtio_net")));
-static VirtqAvail tx_avail __attribute__((aligned(16), section(".bss.virtio_net")));
-static VirtqUsed tx_used __attribute__((aligned(16), section(".bss.virtio_net")));
-static uint8_t tx_buffer[TX_BUFFER_SIZE] __attribute__((aligned(16), section(".bss.virtio_net")));
-
-static void barrier()
+static uint32_t pci_cfg_read(uint32_t bus, uint32_t dev, uint32_t fn, uint32_t off)
 {
-    asm volatile("dmb osh\n dsb sy\n" ::: "memory");
+    outl(0xCF8, 0x80000000U | (bus << 16) | (dev << 11) | (fn << 8) | (off & 0xFCU));
+    return inl(0xCFC);
+}
+static void pci_cfg_write(uint32_t bus, uint32_t dev, uint32_t fn, uint32_t off, uint32_t v)
+{
+    outl(0xCF8, 0x80000000U | (bus << 16) | (dev << 11) | (fn << 8) | (off & 0xFCU));
+    outl(0xCFC, v);
 }
 
-static void mmio_write(uint32_t off, uint32_t value)
+static void queue_init(Vq* q, uint16_t index, uint32_t* size_out)
 {
-    mmio[off / 4U] = value;
+    outw(io_base + VIO_QUEUE_SELECT, index);
+    uint32_t n = inw(io_base + VIO_QUEUE_SIZE);
+    *size_out = n;
+    uint8_t* p = (uint8_t*)q;
+    for (uint64_t i = 0; i < sizeof(Vq); ++i) p[i] = 0;
+    outl(io_base + VIO_QUEUE_PFN, (uint32_t)((uint64_t)q >> 12));
 }
 
-static uint32_t mmio_read(uint32_t off)
+void net_device_init()
 {
-    return mmio[off / 4U];
-}
-
-static void zero_queue(VirtqDesc* d, VirtqAvail* a, VirtqUsed* u, int n)
-{
-    for (int i = 0; i < n; ++i)
-    {
-        d[i].addr = 0; d[i].len = 0; d[i].flags = 0; d[i].next = 0;
-        a->ring[i] = 0;
-        u->ring[i].id = 0; u->ring[i].len = 0;
-    }
-    a->flags = 0; a->idx = 0; a->used_event = 0;
-    u->flags = 0; u->idx = 0; u->avail_event = 0;
-}
-
-static int setup_queue(uint16_t index, VirtqDesc* d, VirtqAvail* a, VirtqUsed* u, int max_local)
-{
-    mmio_write(V_QUEUE_SEL, index);
-    uint32_t max = mmio_read(V_QUEUE_NUM_MAX);
-    if (max < 1) return 0;
-    int n = (int)max;
-    if (n > max_local) n = max_local;
-    if (n < 1) return 0;
-    if (mmio_read(V_QUEUE_READY) != 0) return 0;
-    zero_queue(d, a, u, n);
-    mmio_write(V_QUEUE_NUM, (uint32_t)n);
-    uint64_t da = (uint64_t)d, aa = (uint64_t)a, ua = (uint64_t)u;
-    mmio_write(V_QUEUE_DESC_LOW, (uint32_t)da);
-    mmio_write(V_QUEUE_DESC_HIGH, (uint32_t)(da >> 32));
-    mmio_write(V_QUEUE_DRIVER_LOW, (uint32_t)aa);
-    mmio_write(V_QUEUE_DRIVER_HIGH, (uint32_t)(aa >> 32));
-    mmio_write(V_QUEUE_DEVICE_LOW, (uint32_t)ua);
-    mmio_write(V_QUEUE_DEVICE_HIGH, (uint32_t)(ua >> 32));
-    barrier();
-    mmio_write(V_QUEUE_READY, 1);
-    return mmio_read(V_QUEUE_READY) == 1;
-}
-
-static int wait_used(VirtqUsed* used, uint16_t old_idx)
-{
-    uint64_t start = timer_millis();
-    while (used->idx == old_idx)
-    {
-        barrier();
-        if (timer_millis() - start >= REQUEST_TIMEOUT_MS) return -110;
-    }
-    return 0;
-}
-
-void virtio_net_init()
-{
-    present = ready = 0;
-    queue_size = 0; device_irq = -1; base_addr = 0;
+    present = ready = 0; io_base = 0; rx_last = tx_last = 0;
     for (int i = 0; i < 6; ++i) mac_address[i] = 0;
 
-    uint64_t base = 0, size = 0; int irq = -1;
-    if (!virtio_mmio_find_device(VIRTIO_NET_DEVICE_ID, &base, &size, &irq))
-    {
-        uart_puts("VirtIO Net: device not found.\r\n");
-        return;
-    }
+    int found = 0; uint32_t fb = 0, fd = 0;
+    for (uint32_t bus = 0; bus < 8 && !found; ++bus)
+        for (uint32_t dev = 0; dev < 32 && !found; ++dev)
+        {
+            uint32_t id = pci_cfg_read(bus, dev, 0, 0);
+            if ((id & 0xFFFFU) == 0x1AF4U && (id >> 16) == 0x1000U) { found = 1; fb = bus; fd = dev; }
+        }
+    if (!found) { uart_puts("Network: no virtio-net PCI device found.\r\n"); return; }
 
-    base_addr = base; device_irq = irq; mmio = (volatile uint32_t*)base;
-    if (mmio_read(V_MAGIC) != 0x74726976U || mmio_read(V_VERSION) != 2U || mmio_read(V_DEVICE_ID) != VIRTIO_NET_DEVICE_ID)
-    {
-        uart_puts("VirtIO Net: unsupported transport.\r\n");
-        mmio = 0; return;
-    }
+    uint32_t bar0 = pci_cfg_read(fb, fd, 0, 0x10);
+    if (!(bar0 & 1U)) { uart_puts("Network: virtio-net BAR0 is not an I/O BAR.\r\n"); return; }
+    io_base = (uint16_t)(bar0 & 0xFFFCU);
+    uint32_t cmd = pci_cfg_read(fb, fd, 0, 0x04);
+    pci_cfg_write(fb, fd, 0, 0x04, (cmd & 0xFFFFU) | 0x5U); /* I/O space + bus master */
     present = 1;
 
-    mmio_write(V_STATUS, 0);
-    mmio_write(V_STATUS, STATUS_ACKNOWLEDGE);
-    mmio_write(V_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
+    outb(io_base + VIO_STATUS, 0);
+    outb(io_base + VIO_STATUS, ST_ACK);
+    outb(io_base + VIO_STATUS, ST_ACK | ST_DRIVER);
+    uint32_t features = inl(io_base + VIO_DEVICE_FEATURES);
+    if (!(features & F_MAC)) { uart_puts("Network: virtio-net lacks MAC feature.\r\n"); outb(io_base + VIO_STATUS, ST_FAILED); return; }
+    outl(io_base + VIO_GUEST_FEATURES, F_MAC);
+    for (int i = 0; i < 6; ++i) mac_address[i] = inb(io_base + VIO_CONFIG + i);
 
-    mmio_write(V_DEVICE_FEATURES_SEL, 0);
-    uint32_t features_lo = mmio_read(V_DEVICE_FEATURES);
-    mmio_write(V_DEVICE_FEATURES_SEL, 1);
-    uint32_t features_hi = mmio_read(V_DEVICE_FEATURES);
-    if ((features_hi & (1U << (VIRTIO_F_VERSION_1 - 32U))) == 0 || (features_lo & (1U << VIRTIO_NET_F_MAC)) == 0)
+    queue_init(&rxq, 0, &rx_qsize);
+    queue_init(&txq, 1, &tx_qsize);
+    if (rx_qsize == 0 || rx_qsize > QMAX || tx_qsize == 0 || tx_qsize > QMAX)
     {
-        uart_puts("VirtIO Net: required features unavailable.\r\n");
-        mmio_write(V_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FAILED);
+        uart_puts("Network: virtio-net queue size unsupported.\r\n");
+        outb(io_base + VIO_STATUS, ST_FAILED);
         return;
     }
-
-    mmio_write(V_DRIVER_FEATURES_SEL, 0);
-    mmio_write(V_DRIVER_FEATURES, (1U << VIRTIO_NET_F_MAC));
-    mmio_write(V_DRIVER_FEATURES_SEL, 1);
-    mmio_write(V_DRIVER_FEATURES, (1U << (VIRTIO_F_VERSION_1 - 32U)));
-    mmio_write(V_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK);
-    barrier();
-    if ((mmio_read(V_STATUS) & STATUS_FEATURES_OK) == 0)
+    for (uint32_t i = 0; i < RX_BUFS && i < rx_qsize; ++i)
     {
-        uart_puts("VirtIO Net: FEATURES_OK rejected.\r\n");
-        return;
-    }
-
-    volatile uint8_t* config8 = (volatile uint8_t*)((uint64_t)mmio + V_CONFIG);
-    for (int i = 0; i < 6; ++i)
-        mac_address[i] = config8[i];
-
-    mmio_write(V_QUEUE_SEL, 0);
-    uint32_t rxmax = mmio_read(V_QUEUE_NUM_MAX);
-    if (rxmax < 1) { uart_puts("VirtIO Net: RX queue unavailable.\r\n"); return; }
-    queue_size = (int)rxmax; if (queue_size > (int)QUEUE_MAX) queue_size = (int)QUEUE_MAX;
-    if (queue_size < 1) return;
-
-    if (!setup_queue(0, rx_desc, &rx_avail, &rx_used, QUEUE_MAX) || !setup_queue(1, tx_desc, &tx_avail, &tx_used, 1))
-    {
-        uart_puts("VirtIO Net: queue setup failed.\r\n");
-        return;
-    }
-
-    tx_last_used = 0; rx_last_used = 0;
-    for (int i = 0; i < queue_size; ++i)
-    {
-        rx_desc[i].addr = (uint64_t)&rx_buffers[i][0];
-        rx_desc[i].len = RX_BUFFER_SIZE;
-        rx_desc[i].flags = DESC_WRITE;
-        rx_desc[i].next = 0;
-        rx_avail.ring[i] = (uint16_t)i;
+        rxq.desc[i].addr = (uint64_t)&rx_buf[i][0];
+        rxq.desc[i].len = BUF_SIZE;
+        rxq.desc[i].flags = DESC_WRITE;
+        rxq.desc[i].next = 0;
+        rxq.avail_ring[i] = (uint16_t)i;
     }
     barrier();
-    rx_avail.idx = (uint16_t)queue_size;
+    rxq.avail_idx = (uint16_t)(RX_BUFS < rx_qsize ? RX_BUFS : rx_qsize);
     barrier();
-    mmio_write(V_QUEUE_SEL, 0);
-    mmio_write(V_QUEUE_NOTIFY, 0);
-
-    mmio_write(V_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK);
-    barrier();
-    if ((mmio_read(V_STATUS) & STATUS_DRIVER_OK) == 0)
-    {
-        uart_puts("VirtIO Net: DRIVER_OK rejected.\r\n");
-        mmio_write(V_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_FAILED);
-        return;
-    }
+    outb(io_base + VIO_STATUS, ST_ACK | ST_DRIVER | ST_OK);
+    outw(io_base + VIO_QUEUE_NOTIFY, 0);
     ready = 1;
-    uart_puts("VirtIO Net: ready.\r\n");
+    uart_puts("Network: virtio-net (PCI legacy) ready.\r\n");
 }
 
-int virtio_net_present() { return present; }
-int virtio_net_ready() { return ready; }
-void virtio_net_get_mac(uint8_t mac[6]) { if (!mac) return; for (int i=0;i<6;i++) mac[i]=mac_address[i]; }
-uint64_t virtio_net_base() { return base_addr; }
-int virtio_net_irq() { return device_irq; }
+int net_device_present() { return present; }
+int net_device_ready() { return ready; }
+void net_device_get_mac(uint8_t mac[6]) { if (mac) for (int i = 0; i < 6; ++i) mac[i] = mac_address[i]; }
+uint64_t net_device_base() { return io_base; }
+int net_device_irq() { return -1; }
 
-int virtio_net_send(const void* frame, uint32_t length)
+int net_device_send(const void* frame, uint32_t length)
 {
-    if (!ready || !frame || length == 0 || length > (TX_BUFFER_SIZE - NET_HDR_SIZE)) return -22;
-    for (uint32_t i = 0; i < NET_HDR_SIZE; ++i) tx_buffer[i] = 0;
+    if (!ready || !frame || length == 0 || length > BUF_SIZE - NET_HDR) return -22;
+    for (uint32_t i = 0; i < NET_HDR; ++i) tx_buf[i] = 0;
     const uint8_t* src = (const uint8_t*)frame;
-    for (uint32_t i = 0; i < length; ++i) tx_buffer[NET_HDR_SIZE + i] = src[i];
-    tx_desc[0].addr = (uint64_t)tx_buffer;
-    tx_desc[0].len = NET_HDR_SIZE + length;
-    tx_desc[0].flags = 0;
-    tx_desc[0].next = 0;
-    uint16_t old = tx_avail.idx;
+    for (uint32_t i = 0; i < length; ++i) tx_buf[NET_HDR + i] = src[i];
+    txq.desc[0].addr = (uint64_t)tx_buf;
+    txq.desc[0].len = NET_HDR + length;
+    txq.desc[0].flags = 0;
+    txq.desc[0].next = 0;
+    uint16_t idx = txq.avail_idx;
+    txq.avail_ring[idx % tx_qsize] = 0;
     barrier();
-    tx_avail.ring[old % 1] = 0;
-    tx_avail.idx = (uint16_t)(old + 1U);
+    txq.avail_idx = (uint16_t)(idx + 1U);
     barrier();
-    mmio_write(V_QUEUE_SEL, 1);
-    mmio_write(V_QUEUE_NOTIFY, 1);
-    if (wait_used(&tx_used, tx_last_used) < 0) return -110;
-    if (tx_used.ring[tx_last_used % 1].id != 0) return -5;
-    tx_last_used = (uint16_t)(tx_last_used + 1U);
+    outw(io_base + VIO_QUEUE_NOTIFY, 1);
+    uint64_t start = timer_millis();
+    while (*(volatile uint16_t*)&txq.used_idx == tx_last)
+    {
+        if (timer_millis() - start >= TIMEOUT_MS) return -110;
+        asm volatile("pause");
+    }
+    tx_last = (uint16_t)(tx_last + 1U);
     return 0;
 }
 
-
-static void recycle_rx_buffer(uint32_t descriptor_id)
+static void recycle(uint32_t id)
 {
-    if (!ready || queue_size <= 0 || descriptor_id >= (uint32_t)queue_size) return;
-    rx_avail.ring[rx_avail.idx % (uint16_t)queue_size] = (uint16_t)descriptor_id;
+    rxq.avail_ring[rxq.avail_idx % rx_qsize] = (uint16_t)id;
     barrier();
-    rx_avail.idx = (uint16_t)(rx_avail.idx + 1U);
+    rxq.avail_idx = (uint16_t)(rxq.avail_idx + 1U);
     barrier();
-    mmio_write(V_QUEUE_SEL, 0);
-    mmio_write(V_QUEUE_NOTIFY, 0);
+    outw(io_base + VIO_QUEUE_NOTIFY, 0);
 }
 
-int virtio_net_receive(void* frame, uint32_t capacity)
+int net_device_receive(void* frame, uint32_t capacity)
 {
     if (!ready || !frame || capacity == 0) return -22;
-    if (rx_used.idx == rx_last_used) return 0;
-    uint16_t slot = (uint16_t)(rx_last_used % (uint16_t)queue_size);
-    volatile VirtqUsedElem* elem = &rx_used.ring[slot];
-    if (elem->id >= (uint32_t)queue_size)
-    {
-        rx_last_used = (uint16_t)(rx_last_used + 1U);
-        return -5;
-    }
-    if (elem->len < NET_HDR_SIZE || elem->len > RX_BUFFER_SIZE)
-    {
-        recycle_rx_buffer(elem->id);
-        rx_last_used = (uint16_t)(rx_last_used + 1U);
-        return -5;
-    }
-    uint32_t frame_len = elem->len - NET_HDR_SIZE;
-    /* Ethernet frames are atomic packets; do not silently return truncated data. */
-    if (frame_len > capacity)
-    {
-        recycle_rx_buffer(elem->id);
-        rx_last_used = (uint16_t)(rx_last_used + 1U);
-        return -90; /* EMSGSIZE */
-    }
-    const uint8_t* src = &rx_buffers[elem->id][NET_HDR_SIZE];
+    if (*(volatile uint16_t*)&rxq.used_idx == rx_last) return 0;
+    uint32_t slot = rx_last % rx_qsize;
+    uint32_t id = rxq.used_ring[slot].id, len = rxq.used_ring[slot].len;
+    rx_last = (uint16_t)(rx_last + 1U);
+    if (id >= RX_BUFS) return -5;
+    if (len < NET_HDR || len > BUF_SIZE) { recycle(id); return -5; }
+    uint32_t flen = len - NET_HDR;
+    if (flen > capacity) { recycle(id); return -90; }
+    const uint8_t* src = &rx_buf[id][NET_HDR];
     uint8_t* dst = (uint8_t*)frame;
-    for (uint32_t i = 0; i < frame_len; ++i) dst[i] = src[i];
-
-    recycle_rx_buffer(elem->id);
-    rx_last_used = (uint16_t)(rx_last_used + 1U);
-    return (int)frame_len;
+    for (uint32_t i = 0; i < flen; ++i) dst[i] = src[i];
+    recycle(id);
+    return (int)flen;
 }
 
-static void print_hex8(uint8_t v) { static const char h[]="0123456789ABCDEF"; uart_putc(h[v>>4]); uart_putc(h[v&15]); }
-void virtio_net_status()
+static void hex8(uint8_t v) { static const char h[] = "0123456789ABCDEF"; uart_putc(h[v >> 4]); uart_putc(h[v & 15]); }
+void net_device_status()
 {
-    uart_puts("VirtIO Net status\r\n-----------------\r\nPresent : ");
-    uart_puts(present ? "yes\r\n" : "no\r\n");
+    uart_puts("Network device status\r\n---------------------\r\nPresent : ");
+    uart_puts(present ? "yes (virtio-net PCI)\r\n" : "no\r\n");
     uart_puts("Ready   : "); uart_puts(ready ? "yes\r\n" : "no\r\n");
     uart_puts("MAC     : ");
-    for (int i=0;i<6;i++){ print_hex8(mac_address[i]); if(i!=5) uart_putc(':'); }
-    uart_puts("\r\nIRQ     : ");
-    if (device_irq < 0) uart_puts("unknown\r\n");
-    else { char b[16]; int p=0; int v=device_irq; if(v==0)b[p++]='0'; while(v){b[p++]=(char)('0'+v%10);v/=10;} while(p)uart_putc(b[--p]); uart_puts("\r\n"); }
+    for (int i = 0; i < 6; ++i) { hex8(mac_address[i]); if (i != 5) uart_putc(':'); }
+    uart_puts("\r\nIRQ     : polled\r\n");
 }

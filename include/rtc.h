@@ -3,7 +3,7 @@
 
 #include "types.h"
 
-/* QEMU virt PL031 RTC.  No interrupt is used. */
+/* CMOS RTC (x86-64). */
 uint64_t rtc_get_epoch();
 int rtc_set_epoch(uint64_t epoch);
 

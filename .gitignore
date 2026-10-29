@@ -27,8 +27,3 @@ Thumbs.db
 *.tmp
 *.swp
 *~
-/build-x86_64/
-
-# Python bytecode/cache for tooling
-__pycache__/
-*.py[cod]

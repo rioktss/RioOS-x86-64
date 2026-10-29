@@ -1,21 +1,39 @@
-# Filesystem and security notes
+# P2: Filesystem and permission hardening — RioOS 1.8.0
 
-The common MyFS/VFS implementation includes path resolution, file/directory ownership metadata, permission checks, bounded read/write, `stat`, truncate, and `chmod` APIs. The kernel has a shell-level root/user role and a simple development authentication flow. This is an educational model rather than production security: the development root password is embedded in source and credentials are not a complete per-process isolation model.
+> **v1.13.0 note:** the timer IRQ is now active (100 Hz tick, also while ring 3 programs run) and the GUI was removed. Statements below that say the timer IRQ is disabled/off describe the earlier version this document was written for; see [TIMER_IRQ.md](./TIMER_IRQ.md) and [TERMINAL.md](./TERMINAL.md).
 
-The shared syscall dispatcher contains permission-aware filesystem operations and temporary unprivileged credentials for user-mode requests. On the x86-64 port these paths are reachable from ring-3 executables (`exec`, `nano`, `calc`) through native `syscall` entry/return and per-program user page tables.
 
-## Known gaps
+## What changed
 
-- No journaling or crash-atomic multi-inode transactions.
-- No symlink support or full POSIX permission model.
-- No independent per-process address spaces or concurrent user processes.
-- No claim of durability until ATA disk writes and reboot persistence have been tested in QEMU on the target host.
+- Each filesystem node now carries persisted `uid` and `gid` fields in memory. On disk these fields and a metadata marker use the previously reserved bytes of the existing 128-byte inode, so the superblock version and inode size remain unchanged.
+- Old inodes with no marker are migrated after structural validation. The root inode and entries outside user homes become root-owned; entries below `/home/user` or `/storage/home` become UID/GID 1000. Migration is written only after the mounted tree passes structural checks.
+- Permission checks follow owner, group, then other mode bits. UID 0 bypasses normal data-access checks. Path traversal requires execute/search permission; file read/write, directory mutation, rename/remove, `chmod`, and `chown` enforce access rules. ELF loading additionally requires at least one execute bit, including when launched from a root shell.
+- `chmod` is allowed to the owner or root. `chown` is root-only. New files inherit current credentials. Standard user homes are assigned to UID/GID 1000 during mount initialization.
+- `stat`, `chown`, and `truncate` are exposed as shell commands. Truncate accepts 0 through 262144 bytes, preserves existing bytes and zero-fills extensions.
+- ELF loading requires execute permission. Raw `diskread`, `diskwrite`, and `diskflush` commands require root so the shell cannot trivially bypass filesystem checks by editing raw sectors.
+- Added `SYS_FS_STAT`, `SYS_FS_TRUNCATE`, and `SYS_FS_CHMOD` (numbers 23–25) and `user_fs_stat`, `user_fs_truncate`, `user_fs_chmod` helpers. The syscall path temporarily uses unprivileged UID/GID 1000 for ring 3 calls, then restores the prior ring 0 credentials.
 
-## Validation
+## Quick shell test
 
-```sh
-bash linux/build-x86_64.sh --clean
-python3 tests/verify_x86_64.py
+```text
+touch /storage/home/demo.txt
+write /storage/home/demo.txt hello
+stat /storage/home/demo.txt
+chmod 600 /storage/home/demo.txt
+truncate /storage/home/demo.txt 8
+cat /storage/home/demo.txt
+su root
+# enter the development password: 123
+chown 0 0 /storage/home/demo.txt
+logout
 ```
 
-The verifier checks compilation artifacts only. Run QEMU, create a file, reboot, and confirm disk persistence before treating the hardware storage path as runtime-verified.
+To verify denial, create a root-owned file, set mode `600`, return to the user identity, then try `cat`, `write`, or `chmod` on that file. User access should be denied.
+
+## Limitations
+
+This remains an educational single-user-credential model: root UID/GID are kept in a shell-global role, with ring 3 syscalls forced to UID/GID 1000. Credentials are not stored per process, so this is not a hardened isolation boundary for concurrent processes. The development root password is embedded in source and must be changed for local experiments; it is not production-grade authentication. There is no journal, symlink support, advanced ACL, sticky bit, or crash-atomic multi-inode transaction layer. Timer IRQ is not enabled by this increment.
+
+## Tests
+
+`tests/fs_host_test.cpp` exercises denied reads/writes and `chmod`, owner-level `chmod`, root-only owner changes, stat contents, truncate/zero-fill/maximum-size error, metadata persistence, and legacy inode metadata migration. `tests/syscall_host_test.cpp` covers new syscall dispatch and confirms ring 3 filesystem credential overrides are restored after returning to ring 0. `tests/verify_x86_64.py` checks the P2 source/ABI invariants.

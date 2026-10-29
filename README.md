@@ -1,79 +1,164 @@
-# RioOS-x86-64 
+# RioOS
 
-This repository is the x86-64 port of MyKernel/RioOS: a freestanding C++17 + assembly kernel for the QEMU PC machine. The guest runs without Linux; normal boot does not require GRUB or an ISO.
+<p align="center">
+  <strong>RioOS — x86-64 Bare-Metal Operating System</strong><br>
+  Built around the custom MyKernel kernel and designed to boot on QEMU <code>pc</code>.
+</p>
 
-> **Verification status:** the project includes host unit tests and x86-64 ELF/Multiboot structural checks. The source package has not been runtime-tested with `qemu-system-x86_64` in the environment used to prepare this ZIP, so a real QEMU boot should still be tested on the target device.
+<p align="center">
+  <a href="https://github.com/rioktss/RioOS">Repository</a> ·
+  <a href="./docs/BUILD_AND_RUN.md">Build &amp; Run</a> ·
+  <a href="./docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="./docs/LEARN.md">Learning Guide</a> ·
+  <a href="./docs/ROADMAP.md">Roadmap</a>
+</p>
 
-## RioOS Preview
+> 🇮🇩 Made in Indonesia. Built to be studied, improved, and shared.
 
-![RioOS x86-64 Preview](docs/img/rioos-preview.png)
+[![Architecture](https://img.shields.io/badge/architecture-x86--64-informational)](https://github.com/rioktss/RioOS)
+[![Target](https://img.shields.io/badge/target-QEMU%20pc-success)](https://www.qemu.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue)](./docs/LICENSE)
+[![Status](https://img.shields.io/badge/status-work%20in%20progress-orange)](#project-status)
 
-*RioOS x86-64 running on the QEMU PC machine.*
+## About RioOS
 
-## Build and run
+RioOS is an educational **bare-metal x86-64 operating-system project**. It boots the custom MyKernel kernel directly in QEMU rather than running as a Linux application. The host operating system supplies the compiler, linker, tests, and QEMU; the guest kernel is freestanding C++17 plus assembly.
 
-Required build tools: `clang`, `clang++`, `ld.lld`, and Python 3. To run, install `qemu-system-x86_64` with a display backend if you need the graphical modes.
+**Current source baseline: v1.13.0 — live 100 Hz timer IRQ and a shell-only QEMU window terminal (scrollable with the mouse wheel).** RioOS is under active development. Host-side tests and release checks cover many subsystems, but a successful build is not a substitute for testing the QEMU window on the target machine.
+
+## Quick start
+
+Install a Clang/LLVM toolchain that supports `--target=x86_64-unknown-none-elf`, Python 3, and `qemu-system-x86_64`. Then run the scripts for your host platform from the repository root. Every script resolves the repository root automatically, so the current working directory does not affect source/output paths.
 
 ### Linux
 
-```sh
-bash linux/build.sh --clean
-bash linux/run.sh                 # headless serial shell in this terminal
-bash linux/run-terminal.sh        # original shell in a separate black QEMU window
-bash linux/run-ui.sh              # graphical pixel UI, keyboard + PS/2 mouse
-bash linux/make-x86_64-iso.sh     # optional ISO; requires grub-mkrescue + xorriso
+```bash
+bash linux/build.sh
+bash linux/run.sh             # Serial shell in the current terminal
+bash linux/run-terminal.sh    # Shell in a QEMU window (mouse-wheel scrollback)
 ```
 
 ### Termux on Android
 
-```sh
-bash termux/build.sh --clean
+```bash
+bash termux/build.sh
 bash termux/run.sh
-bash termux/run-terminal.sh       # requires a graphical QEMU backend / Termux:X11
-bash termux/run-ui.sh
+bash termux/run-terminal.sh
 ```
 
-Tool availability depends on the packages and QEMU build available in the configured Termux repositories. Building and structural checks can work even if a suitable QEMU graphical frontend is unavailable.
+For a graphical window, start **Termux:X11** first and use a QEMU build with SDL or GTK support. You can select the SDL backend with `RIOOS_DISPLAY=sdl bash termux/run-terminal.sh`.
 
 ### macOS
 
-```sh
-bash macos/build.sh --clean
+```bash
+bash macos/build.sh
 bash macos/run.sh
 bash macos/run-terminal.sh
-bash macos/run-ui.sh
 ```
 
-The wrappers default to QEMU's Cocoa display backend for windowed modes; set `RIOOS_DISPLAY` to a backend supported by your QEMU build if needed.
+The macOS window runners default to QEMU's `cocoa` display backend. Set `RIOOS_DISPLAY=sdl` if your QEMU installation uses SDL instead. Your LLVM/Clang must support the bare-metal x86-64 target and `ld.lld` must be installed (e.g. `brew install llvm lld`).
 
 ### Windows PowerShell
 
 ```powershell
-.\windowsuild.ps1 --clean
-.\windows
-un.ps1
-.\windows
-un-terminal.ps1
-.\windows
-un-ui.ps1
+.\windows\build.ps1
+.\windows\run.ps1             # Serial shell
+.\windows\run-terminal.ps1    # Shell in a QEMU window (mouse-wheel scrollback)
 ```
 
-Use a PowerShell environment where Clang, `ld.lld`, Python, and QEMU are on `PATH`. `build-x86_64.sh` remains available in each Bash platform folder as a compatibility alias for `build.sh`; Windows has `build-x86_64.ps1` as an alias.
+All platform folders contain the same three entry points: `build`, `run`, and `run-terminal`. Windows uses PowerShell `.ps1` scripts; Linux, Termux, and macOS use Bash `.sh` scripts.
 
-### Build options
+## Build options
 
-The Bash build supports `--clean`, `--verbose` / `-v`, `--skip-tests`, `--run`, and `--help`. PowerShell supports `--clean`, `--skip-tests`, `--run`, and `--help`. Build products are written to `build-x86_64/`; user ELFs are in `build-x86_64/user/`, and `storage/disk.img` is the persistent 16 MiB MyFS disk. Back up the disk image before deleting or regenerating it if you need to keep guest files.
+Pass these flags to the platform's build script:
 
-## Included features
+| Option | Result |
+|---|---|
+| `--clean` | Remove generated compiler objects and host-test executables before rebuilding. The persistent `storage/disk.img` is not automatically deleted. |
+| `--verbose` / `-v` | Show detailed compiler commands/output. |
+| `--run` | Build and test, then start the default serial/headless QEMU runner (`run`), not the QEMU window. |
+| `--help` / `-h` | Print the available options. |
 
-- Shell, command history, environment variables, pipes/redirection, MyFS + VFS, file permissions, users (`user`, `su root` / password `123`), file descriptors and pipes.
-- Ring-3 user programs: `exec <elf>`, `nano <file>` (Ctrl+S/Ctrl+O save, Ctrl+X exit), `calc [expr]`, and `userdemo`; per-program page tables, NX/W^X, pointer validation, and process-local fault termination.
-- Pixel UI: lock screen, home screen, Terminal, Calculator, Clock, Files, Launcher, Wallpaper, and Settings.
-- PS/2 keyboard/mouse input with on-screen cursor, QEMU standard VGA / Bochs VBE framebuffer, and a serial shell fallback.
-- PCI legacy VirtIO networking with ARP/IPv4/ICMP/UDP/DNS support (`ifconfig`, `ping`, `nslookup`, and UDP socket syscalls), ATA PIO disk, CMOS RTC, PIT/TSC timer, PIC interrupt handlers, and cooperative kernel threads.
+Examples:
 
-See [the x86-64 port notes](docs/X86_64_PORT.md), [build guide](docs/BUILD_AND_RUN.md), and [development notes](docs/DEVELOPMENT.md) for implementation details and known limits.
+```bash
+bash linux/build.sh --clean
+bash linux/build.sh --verbose
+bash linux/build.sh --run
+```
+
+```powershell
+.\windows\build.ps1 --clean
+.\windows\build.ps1 --verbose
+.\windows\build.ps1 --run
+```
+
+To customize QEMU or tool paths, use the existing environment overrides such as `CLANG`, `CXX`, `LD`, `PYTHON`, `QEMU`, `RIOOS_MEM`, and `RIOOS_DISPLAY`. More details and troubleshooting are in [`docs/BUILD_AND_RUN.md`](./docs/BUILD_AND_RUN.md) and [`docs/PORTABLE_BUILD.md`](./docs/PORTABLE_BUILD.md).
+
+## What is included
+
+- **x86-64 boot and exceptions:** Multiboot v1 entry, 32→64-bit long-mode bootstrap, GDT/TSS, IDT, fault reporting, 8259 PIC and 8254 PIT.
+- **Memory:** paging setup, page allocation, and memory diagnostics.
+- **Processes and threads:** PID-owned ring 3 page tables and physical frames, a guarded 64 KiB user stack, ELF loading into per-process memory, retained ring 3 register frames, system calls, and cooperative kernel-thread context switching. A 100 Hz timer IRQ is live in the shell and while ring 3 programs run; user processes still run synchronously, and preemptive saved-frame process scheduling is not yet enabled.
+- **File descriptors and IPC:** bounded per-process descriptor tables, standard streams, `open/read/write/close/seek`, `dup/dup2`, and bounded non-blocking kernel pipes.
+- **Filesystem and storage:** custom filesystem/VFS and a persistent disk image on an ATA PIO drive.
+- **Networking:** virtio-net (PCI) with Ethernet, ARP/IPv4/ICMP, owner-scoped UDP/DNS, and a bounded outbound TCP client. The `httpget <host> [path]` command tests real plain-HTTP access through QEMU user networking; HTTPS/TLS, DHCP, and IPv6 are not included.
+- **Shell:** environment expansion, `export`/`unset`, basic filesystem commands, and in-memory `cat`/`echo` pipelines to `grep`/`wc`.
+- **Terminal window:** QEMU VBE text terminal (DejaVu Sans Mono, Linux-console palette, 2000-line scrollback, mouse-wheel / Shift+PageUp scrolling). It shows only the shell - there is no GUI.
+- **Input:** PS/2 keyboard and IntelliMouse wheel (the window runner uses `grab-on-hover` so the wheel works when the pointer is over the window). UART remains available.
+- **Validation:** host-side regression tests, release verification, and a GitHub Actions CI workflow.
+
+## Choosing a run mode
+
+| Entry point | What opens |
+|---|---|
+| `run` | The original serial shell in a headless QEMU session; use the host terminal for input/output. |
+| `run-terminal` | The same shell shown in a **QEMU window** by the kernel's framebuffer terminal: black background, DejaVu Sans Mono, scroll with the mouse wheel. The serial console also stays on the host terminal. |
+
+There is no pixel UI, launcher or `.rpk` app any more. Both modes run the same RioOS shell (not GNU Bash). In the window, type with the keyboard, scroll history with the **mouse wheel** (or **Shift+PageUp/PageDown**); any key or new output returns to the bottom. See [`docs/TERMINAL.md`](./docs/TERMINAL.md).
+
+## Project layout
+
+```text
+RioOS/
+├── README.md                 # Main project overview and quick start
+├── linux/                    # build.sh, run.sh, run-terminal.sh
+├── termux/                   # Android/Termux Bash entry points
+├── macos/                    # macOS Bash entry points
+├── windows/                  # build.ps1, run.ps1, run-terminal.ps1
+├── boot/ drivers/ include/   # Boot code (Multiboot), device drivers, public headers
+├── kernel/ memory/ process/  # Kernel, memory manager, scheduler/process code
+├── fs/ net/ userspace/       # Filesystem, network stack, bundled userspace
+├── tools/                    # Font generator for the terminal
+├── tests/                    # Host regression tests and release checks
+├── docs/                     # Architecture, build, development, and feature guides
+├── build/                    # Generated compiler outputs
+└── storage/                  # Persistent virtual disk image and user data
+```
+
+## Known scope and limitations
+
+RioOS is an experimental learning project, not a replacement for Linux/BSD or a ready-to-use general-purpose OS. QEMU display backends and input devices vary by host package. SMP startup remains disabled; the timer IRQ is live (100 Hz tick) but there is no preemptive process switching; per-process address-space isolation is implemented, but saved ring 3 frames are not yet switched between concurrently running user processes; and a QEMU visual/input session should be tested locally when changing the renderer or runners. Read the feature-specific guides for exact implementation status and tests.
+
+## Documentation
+
+- [`docs/BUILD_AND_RUN.md`](./docs/BUILD_AND_RUN.md) — dependencies, commands, platform setup, and troubleshooting.
+- [`docs/PORTABLE_BUILD.md`](./docs/PORTABLE_BUILD.md) — build-system details and environment overrides.
+- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — kernel architecture and subsystem relationships.
+- [`docs/TERMINAL.md`](./docs/TERMINAL.md) — the QEMU window terminal (font, scrollback, input).
+- [`docs/TIMER_IRQ.md`](./docs/TIMER_IRQ.md) — the live timer IRQ, including while ring 3 programs run.
+- [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.md) — development workflow and safe changes.
+- [`docs/LEARN.md`](./docs/LEARN.md) — guided learning path.
+- [`docs/ROADMAP.md`](./docs/ROADMAP.md) — planned work.
+- [`docs/P5_PROCESS_ISOLATION.md`](./docs/P5_PROCESS_ISOLATION.md) — P5 address spaces, page ownership, context frames, and limitations.
+- [`docs/FAQ.md`](./docs/FAQ.md) — common questions.
+- [`tests/TEST_MATRIX.md`](./tests/TEST_MATRIX.md) — general test matrix.
+- [`docs/TEST_MATRIX_P5.md`](./docs/TEST_MATRIX_P5.md) — P5-specific verification matrix.
 
 ## License
 
-See [docs/LICENSE](docs/LICENSE).
+RioOS is released under the [MIT License](./docs/LICENSE).
+
+---
+
+**RioOS • MyKernel • x86-64 • Bare Metal • QEMU • Open Source • Indonesia 🇮🇩**

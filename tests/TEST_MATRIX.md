@@ -1,34 +1,67 @@
-# x86-64 validation matrix
+# RioOS / MyKernel x86-64 v1.13.0 Test Matrix
 
-## Automated in the build environment
+## Automated in the release environment
 
-- Freestanding x86-64 kernel compiles with warnings treated as errors.
-- ELF64 kernel links with `ld.lld` and reports `EM_X86_64`.
-- Flat loadable image is generated at physical base `0x00100000`.
-- ELF32/i386 Multiboot v1 wrapper links and has the Multiboot marker in its first 8 KiB.
-- Build produces a 16 MiB MyFS disk image and seeds built-in `.rpk` manifests and BMP assets.
-- `tests/verify_x86_64.py` rejects missing outputs and accidental return of ARM64-only boot/driver files.
+- x86-64 kernel clean build with `-Wall -Wextra -Werror`
+- User ELF clean build
+- Kernel link with `ld.lld`
+- No unresolved kernel ELF symbols
+- Multiboot v1 header in the first 8 KiB of the QEMU wrapper; kernel entry inside the 1 MiB load image
+- Persistent filesystem host create/write/read/remount/delete test
+- VFS host test (`tests/vfs_host_test.cpp`): writable `/home/user` startup, user can save there while root remains protected, `ls <dir>` with sizes, cwd path, `rm .` keeps cwd valid, VFS recursive remove path
+- Filesystem host test also covers `fs_rename` (mv), mkdir-p, recursive remove, hidden files/default modes, UID/GID persistence/migration, owner/group/other permission denial, stat metadata, truncate zero-fill, and rejection of a corrupt `UINT64_MAX` inode size
+- Network host test (`tests/net_host_test.cpp`): IPv4 parsing, ARP neighbor learning, UDP owner isolation/checksums, DNS A lookup, and TCP handshake/send/receive/FIN with a fake peer
+- File-descriptor host test (`tests/fd_host_test.cpp`): read/write/seek/append/truncate, access modes, per-PID table isolation, shared offsets across `dup`/`dup2`, pipe transfer/ring semantics, non-blocking empty reads, EOF, and `EPIPE`
+- Process manager host test (`tests/process_host_test.cpp`): valid states, bounded ring 3 metadata, unique RUNNING record, protected built-ins, zombie/exit-code lifecycle, and refusing to destroy a running process
+- Scheduler/process integration host test (`tests/scheduler_process_host_test.cpp`): logical-current selection, removal/cleanup, zombie compaction, and fallback selection
+- Framebuffer terminal host test (`console_host_test`): ANSI handling, scrollback, wheel/page scrolling, snap-to-bottom, font anti-aliasing, hostile escape sequences.
+- Disk image/superblock static verification
+- ELF x86-64/LOAD/W+X/entry-permission static verification; loader rejects files with no execute bit even under root
+- ZIP integrity verification
 
-Run:
+## Required on the user's Termux/QEMU host
 
-```sh
-bash linux/build-x86_64.sh --clean --verbose
-python3 tests/verify_x86_64.py
-```
+- Full QEMU boot and visual/input verification (not run in the build container unless `qemu-system-x86_64` is available): `linux/run-terminal.sh` - type, scroll with the mouse wheel, run `nano`/`calc`, check `irq status` ticks while a program runs.
+- `selftest` command
+- `threads` followed by `thread-demo` (cooperative switching only; the 100 Hz tick keeps running)
+- `fds` and `syscall fd` (open/write/seek/read/close/dup/pipe smoke tests); userspace wrapper execution still requires QEMU validation
+- `export DEMO=ok`, `echo $DEMO`, `unset DEMO`, `echo $DEMO`
+- `cat /etc/example | wc -l` against an existing file (or create a test file first)
+- `disk` command
+- `mmu` and `level` commands
+- `exec /bin/init.elf`
+- `nano test.txt` at the default `/home/user` prompt and in `/storage/home`: type, Ctrl+S, Ctrl+X, then `cat test.txt` in the same directory; a write to system-owned `/` should report permission denied unless logged in as root
+- `cp a.txt b.txt`, `cp a.txt /storage/home`, `mv b.txt c.txt`, `mv c.txt /storage/home`, `ls /storage`; prompt shows the current directory
+- `nano` with no argument prints usage; `nano <directory>` is refused
+- `net` and `ping 10.0.2.2`
+- `nslookup example.com` and `httpget neverssl.com /` to test real DNS and outbound plain HTTP
+- Create a file under `/storage/home`, reboot QEMU, and confirm it remains
 
-## Must still be tested with QEMU on the target host
+The release does not claim these QEMU runtime checks were executed inside
+the release build container when `qemu-system-x86_64` is unavailable.
 
-- First boot to the serial shell and typing commands over COM1.
-- ATA PIO IDENTIFY/read/write/flush and filesystem persistence after reboot.
-- PS/2 keyboard navigation in the serial shell and graphical UI.
-- VBE framebuffer mode setup and visible UI rendering with QEMU standard VGA.
-- IRQ0/PIT periodic and one-shot timer commands.
-- Reboot and recovery behavior.
 
-The build container used to prepare this package did not provide `qemu-system-x86_64`, so these runtime checks are not claimed as completed.
+## P1 known limitations
 
-## Current feature gaps
+- Generic pipes are kernel primitives, but the shell pipeline parser still uses its existing in-memory command path; arbitrary ELF-to-ELF pipelines are not yet wired up.
+- `fork()`, `wait()`, descriptor inheritance, and concurrent user ELF processes are not implemented. They require per-process ring 3 address spaces and a real process context switch.
+- Pipe I/O is deliberately non-blocking; full/empty conditions return negative errno-like values rather than suspending a thread.
+- The timer IRQ is active (100 Hz) during these tests; `irq selftest` restores it afterwards.
 
-- Native x86-64 ring-3 execution, page-table-based user isolation, and syscall entry/return are not implemented.
-- No PCI NIC driver, no PS/2 mouse, no APIC routing, and no SMP startup.
-- Built-in GUI apps are static kernel code; `.rpk` files are manifests, not executable user packages.
+
+## P2 known limitations
+
+- The root password `123` is compiled into the source for this development release. It only protects casual shell switching and is not secure against someone with the binary/source.
+- Credentials are global to the current shell/syscall path, not stored in independent process credential structures; concurrent processes are not supported.
+- The on-disk inode layout remains v1 and uses reserved bytes for UID/GID/tag. The migration path is regression-tested with host tests but still requires a real QEMU persistent-disk boot test.
+- Full durability under sudden power loss, journaled transactions, symlinks/inodes beyond the current table, and open-file unlink semantics remain unimplemented.
+
+
+## P3 networking limitations
+
+- UDP handles use their own owner-PID-scoped namespace; they are not ordinary file descriptors yet.
+- UDP receive and DNS lookup are polling-based. There is no IRQ-driven receive path.
+- DNS supports A records only and uses a configured static DNS server (default `10.0.2.3`).
+- TCP is a bounded outbound client: no passive listen/accept, congestion control, MSS negotiation, or out-of-order reassembly. HTTPS/TLS is not implemented; `httpget` is plain HTTP on port 80.
+- DHCP, IPv6, fragment reassembly, and ARP cache expiry are not implemented.
+- Actual QEMU networking tests (`ping 10.0.2.2`, `nslookup example.com`, `httpget neverssl.com /`) must be run outside the host-test environment.

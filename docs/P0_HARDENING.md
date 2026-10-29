@@ -1,16 +1,34 @@
-# Shared process and memory hardening notes
+# P0 Kernel Hardening — RioOS 1.6.1
 
-The shared source retains bounded process metadata, conservative ELF validation, denied writable/executable segment combinations, executable-file permission checks, process lifecycle checks, file-descriptor ownership, and pointer-validation interfaces.
+> **v1.13.0 note:** the timer IRQ is now active (100 Hz tick, also while ring 3 programs run) and the GUI was removed. Statements below that say the timer IRQ is disabled/off describe the earlier version this document was written for; see [TIMER_IRQ.md](./TIMER_IRQ.md) and [TERMINAL.md](./TERMINAL.md).
 
-## x86-64 limitation
 
-This x86-64 port does **not** yet have page-table-based ring-3 mappings, a TSS-backed privilege transition, or a native syscall entry/return path. `process/user.cpp` intentionally rejects `exec` instead of attempting to run an unverified image. Therefore, shared EL0/ring-3 hardening code must be treated as porting scaffolding on this target, not as an active privilege boundary.
+This increment focuses on safety invariants in the existing single-core kernel. It deliberately does **not** enable the Generic Timer IRQ or advertise full process preemption.
 
-## Validation
+## Changes in this increment
+
+- Process-table reads and writes are protected by saving/restoring the CPU IRQ mask, and host tests use a no-assembly test shim.
+- A process record cannot be configured outside the reserved ring 3 virtual window.
+- Process state values are validated, only one process record can be marked `RUNNING` at a time, PIDs do not wrap through signed overflow, and the built-in kernel/shell records cannot be destroyed or marked as exited.
+- A process marked `RUNNING` cannot be reclaimed directly; it must first leave the running state or become a zombie.
+- The synchronous ring 3 `exec` path restores the kernel record's running metadata when ring 3 returns.
+- MMU user-page setup fails closed, validates page-permission flags, rejects unknown flags and write/execute mappings, and refuses to configure ring 3 mappings when the MMU is disabled.
+- The ELF loader accepts x86-64 `ET_EXEC`, validates load flags/alignment, rejects PT_LOAD ranges that share a page (permissions are page-granular), clears stale loader status on failure, and resets user mappings if activation fails.
+- User path/string syscall scans use integer-address overflow guards before dereferencing user-provided pointers.
+- Added `tests/process_host_test.cpp` and wired it into `linux/build.sh` and release verification.
+
+## Explicit limits (not completed by this patch)
+
+The process scheduler remains a **logical PID/state scheduler**; its tick does not switch the active CPU context. `process/thread.cpp` provides cooperative **kernel-thread** switching, but it is not a per-process ring 3 context switch. Each ring 3 execution still uses one reserved user virtual window and runs synchronously until syscall-exit or a fatal exception. Per-process page tables/address spaces, separately saved ring 3 register frames, a generic process context switch, and real process-level preemptive multitasking remain future work.
+
+Timer IRQ and CPU IRQ unmasking stay disabled in the normal boot path. Host tests validate helper invariants but cannot replace a QEMU boot/interactivity test.
+
+## Verification
+
+Run from the repository root:
 
 ```sh
-bash linux/build-x86_64.sh --clean
-python3 tests/verify_x86_64.py
+bash linux/build.sh
 ```
 
-The above checks compilation and image structure only. Before enabling userspace, implement and test x86-64 page tables, user/kernel privilege transitions, a native syscall ABI, page-fault reporting and return handling, and independent process address spaces. Runtime QEMU validation is separate and still required.
+The build compiles the x86-64 kernel, runs host tests, checks ELF/link layout, checks unresolved symbols, and runs static release verification. Then separately boot the resulting kernel in QEMU and test keyboard input, shell responsiveness, `/bin/init.elf`, process exit cleanup, and filesystem persistence.

@@ -121,5 +121,6 @@ void fault_report(uint64_t esr, uint64_t elr, uint64_t far, uint64_t spsr)
     uart_puts("\r\n");
 }
 
+void fault_note(int from_user) { if (from_user) ++user_faults; else ++kernel_faults; }
 uint64_t fault_user_count() { return user_faults; }
 uint64_t fault_kernel_count() { return kernel_faults; }

@@ -27,6 +27,8 @@ void fault_decode(uint64_t esr, FaultInfo* out);
 /* Prints a one-paragraph report for a fault and counts it. */
 void fault_report(uint64_t esr, uint64_t elr, uint64_t far, uint64_t spsr);
 
+/* Count a fault whose report was printed elsewhere (x86-64 exception stubs). */
+void fault_note(int from_user);
 uint64_t fault_user_count();
 uint64_t fault_kernel_count();
 

@@ -1,16 +1,21 @@
-# File descriptors and pipes
+# P1: File descriptors and generic pipes — RioOS 1.7.0
 
-The shared kernel implements bounded per-process file descriptor tables, standard streams, open/read/write/seek/close, duplicated descriptors (`dup`/`dup2`), and bounded non-blocking byte pipes. The syscall numbers and wrappers are documented in `include/syscall.h` and `include/user_api.h`.
+> **v1.13.0 note:** the timer IRQ is now active (100 Hz tick, also while ring 3 programs run) and the GUI was removed. Statements below that say the timer IRQ is disabled/off describe the earlier version this document was written for; see [TIMER_IRQ.md](./TIMER_IRQ.md) and [TERMINAL.md](./TERMINAL.md).
 
-On this x86-64 port, these facilities are compiled into the kernel, but native ring-3 execution, user page tables, and the x86 syscall entry/return path are not finished. Therefore the EL0/ring-3 wrappers are interface scaffolding and are not currently runnable by user programs. The built-in UI Terminal uses the kernel's shared `execute_command()` dispatcher instead.
 
-## Important current limits
+## What changed
 
-- 24 descriptor slots per process and bounded open-file/pipe tables.
-- Pipes are non-blocking; empty reads return an errno-like negative value, closed write endpoints return EOF, and writing without readers reports an `EPIPE`-like error.
-- `fork()`, `wait()`, descriptor inheritance and concurrent user processes are not implemented.
-- Timer IRQ is disabled during normal boot.
+- Descriptors now live in bounded tables selected by process PID. A descriptor number from one PID is not automatically valid for another PID.
+- An open-file description is separate from a descriptor slot. `dup` and `dup2` share file offset and endpoint lifetime.
+- Added syscalls 20–22: `SYS_FD_DUP`, `SYS_FD_DUP2`, and `SYS_FD_PIPE`.
+- Added `user_fd_dup`, `user_fd_dup2`, and `user_fd_pipe` helpers in `include/user_api.h`.
+- Added bounded 4096-byte non-blocking pipe rings; open file-description lifetime controls pipe reader/writer counts.
+- The synchronous ring 3 runner selects and releases a descriptor table for each launched program.
 
 ## Verification
 
-Run `bash linux/build-x86_64.sh --clean` and `python3 tests/verify_x86_64.py`. These validate the kernel build and image structure, not active user-mode syscall behavior. Actual QEMU boot and interaction tests remain necessary.
+`bash linux/build.sh --clean` compiles the kernel with warnings treated as errors and runs the host test suite. File descriptor tests exercise separate owner tables, shared offsets, descriptor replacement, empty-pipe `EAGAIN`-style return, successful transfer, EOF after writer closure, and `EPIPE` after reader closure. Syscall tests verify the added syscall dispatch and reject invalid `pipe()` user output pointers. Release verification checks that the new syscall paths and userspace wrappers remain present.
+
+## Explicit limitations
+
+This increment does not claim a complete POSIX process model. `fork()`, `wait()`, descriptor inheritance and concurrent user programs remain deferred because RioOS still uses a single shared ring 3 virtual window and executes a user program synchronously on the existing runner. Generic pipes are currently non-blocking and the shell parser has not yet switched arbitrary program pipelines to pipe descriptors. Timer IRQ is not enabled by this feature. Boot and interactive behavior still require QEMU validation on a host with `qemu-system-x86_64`.

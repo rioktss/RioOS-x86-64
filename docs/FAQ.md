@@ -10,23 +10,23 @@ Yes. RioOS is a bare-metal operating-system project with its own kernel, boot pa
 
 ## Is RioOS Linux-based?
 
-No. The kernel is built as a freestanding AArch64 target and runs directly as the guest kernel in QEMU. The host machine only provides development tools and the emulator.
+No. The kernel is built as a freestanding x86-64 target and runs directly as the guest kernel in QEMU. The host machine only provides development tools and the emulator.
 
 ## Is it really bare metal if it runs in QEMU?
 
 Yes, in the OS-development sense used by this project. RioOS runs without a host operating-system kernel underneath it inside the guest. QEMU provides the virtual machine hardware.
 
-## Why ARM64?
+## Why x86-64?
 
-ARM64/AArch64 is a modern architecture with a clear exception-level model and widely used virtualization/emulation support. QEMU also provides a convenient `virt` machine for experimentation.
+x86-64 is a modern architecture with a clear exception-level model and widely used virtualization/emulation support. QEMU also provides a convenient PC (i440FX) machine for experimentation.
 
-## Can I run RioOS on a physical ARM64 board?
+## Can I run RioOS on a physical x86-64 board?
 
-Not as a guaranteed drop-in target today. The repository is currently designed around QEMU's ARM64 `virt` machine and its virtual devices. Porting to real hardware would require hardware-specific work.
+Not as a guaranteed drop-in target today. The repository is currently designed around QEMU's x86-64 PC (i440FX) machine and its virtual devices. Porting to real hardware would require hardware-specific work.
 
 ## Why C++ instead of only C?
 
-RioOS is built with freestanding C++ and AArch64 Assembly. C++ features are used selectively; the project disables normal runtime features such as exceptions and RTTI and does not rely on a host C++ standard library.
+RioOS is built with freestanding C++ and x86-64 Assembly. C++ features are used selectively; the project disables normal runtime features such as exceptions and RTTI and does not rely on a host C++ standard library.
 
 ## Where should I start reading the source?
 
@@ -34,7 +34,7 @@ Start with:
 
 ```text
 boot/boot.S
-linker.ld
+boot/linker.ld
 kernel/kernel.cpp
 ```
 
@@ -42,7 +42,7 @@ Then continue through memory, interrupts, processes, filesystem, and userspace. 
 
 ## Can I learn OS development from RioOS?
 
-Yes. The repository is intentionally shared as a learning and experimentation project. It is best used together with AArch64 documentation, QEMU documentation, and operating-system literature.
+Yes. The repository is intentionally shared as a learning and experimentation project. It is best used together with x86-64 documentation, QEMU documentation, and operating-system literature.
 
 ## Does RioOS guarantee every feature listed in the README is production-stable?
 

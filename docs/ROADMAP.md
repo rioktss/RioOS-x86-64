@@ -2,13 +2,26 @@
 
 RioOS is a long-term learning project. The roadmap is directional rather than a promise of specific release dates.
 
+## P5 — Per-process userspace isolation (v1.12.0)
+
+Implemented in this source baseline:
+
+- PID-keyed ring 3 address spaces with private PML4/PDPT/PD roots and private 4 KiB page tables for the executable image and stack ranges.
+- Physical frames allocated for mapped ELF load segments and a private 64 KiB userspace stack; the lower stack region is left unmapped as a guard.
+- ELF segment data is copied through kernel aliases into owned frames rather than writing to a shared fixed virtual image.
+- Address-space activation/deactivation switches CR3 (which also flushes the TLB).
+- PCB support to save and restore the general-purpose registers, instruction pointer, flags, and ring 3 stack pointer at exception boundaries.
+- User mappings and stack backing frames are released when the process finishes or loading fails.
+
+Still deliberately deferred: scheduling a saved ring 3 exception frame onto a different per-process kernel stack, safe process-to-process resume from IRQ/syscall exit, and timer preemption. The current `user_execute()` path remains synchronous; since 1.13.0 the timer IRQ stays live while ring 3 runs but only counts ticks. P5 therefore provides real memory isolation and context capture, but it must not be described as full concurrent user-process multitasking yet.
+
 ## Near-term goals
 
 ### Kernel stability
 
 - harden interrupt and timer paths
 - extend cooperative kernel threads toward validated preemption only after IRQ/input safety tests
-- implement per-process page tables/address spaces and saved EL0 register frames before claiming process-level multitasking
+- implement scheduler-driven resume of saved ring 3 exception frames on per-process kernel stacks before claiming process-level multitasking
 - improve exception and fault diagnostics
 - increase regression-test coverage
 
@@ -22,7 +35,7 @@ RioOS is a long-term learning project. The roadmap is directional rather than a 
 ### Userspace
 
 - complete pipe integration into the shell and arbitrary userspace process pipelines
-- implement independent EL0 address spaces and saved process CPU contexts before enabling concurrent process execution
+- connect retained ring 3 CPU contexts to a validated process scheduler and exception-return switch path
 - add descriptor inheritance through `fork()` only after real process context switching is available
 - expand the small userspace toolset
 - improve the userspace API documentation
@@ -37,7 +50,7 @@ Implemented in this increment:
 - bounded non-blocking kernel pipes exposed through syscalls and userspace helpers
 - host regression tests for PID isolation, duplicate descriptors, EOF, `EAGAIN`-style results, and `EPIPE`-style errors
 
-Not implemented in this increment: real `fork()`/`wait()` or concurrent ELF processes. The current user runner enters one shared EL0 virtual window synchronously; adding process syscalls without independent address spaces and saved CPU contexts would falsely imply functionality and risk kernel integrity.
+Not implemented in this increment: real `fork()`/`wait()` or concurrent ELF processes. The current user runner enters one shared ring 3 virtual window synchronously; adding process syscalls without independent address spaces and saved CPU contexts would falsely imply functionality and risk kernel integrity.
 
 
 ## P2 filesystem and permission baseline (v1.8.0)
@@ -78,7 +91,7 @@ The root password `123` is a development/demo credential embedded in source; it 
 
 ## Long-term direction
 
-RioOS should become a compact but meaningful ARM64 teaching operating system where a new developer can go from:
+RioOS should become a compact but meaningful x86-64 teaching operating system where a new developer can go from:
 
 ```text
 boot.S
@@ -127,11 +140,12 @@ Implemented in this increment:
 - IPv4 header validation, fragment rejection (reassembly is not implemented), UDP length/checksum validation, and UDP transmit checksums
 - receive queues are bounded; full queues drop newest datagrams and track drops internally; timeout is polling-based
 - DNS A-record queries over UDP with QNAME validation, compressed-name bounds/loop handling, response ID/source checks, configurable DNS server, and QEMU's default `10.0.2.3` resolver
-- UDP and DNS syscall wrappers for EL0 with userspace pointer validation
-- shell commands `ifconfig`, `nslookup`, and root-only `dnsserver <ipv4>`
-- host tests exercise ARP neighbor learning, malformed IPv4 rejection, owner isolation, UDP send/receive, and a fake DNS A response
+- UDP and DNS syscall wrappers for ring 3 with userspace pointer validation
+- shell commands `ifconfig`, `nslookup`, `httpget` (plain HTTP over outbound TCP), and root-only `dnsserver <ipv4>`
+- outbound TCP connect/send/receive/close API and syscall wrappers for ring 3
+- host tests exercise ARP neighbor learning, malformed IPv4 rejection, UDP send/receive and DNS, TCP handshake/ACK/data/FIN, and owner isolation
 
-Not implemented here: TCP, UDP socket handles are a dedicated networking handle namespace rather than ordinary file descriptors, DNS currently resolves A records only, DNS configuration is static (QEMU user-net default), IPv4 fragments are rejected, and runtime QEMU packet exchange must still be tested on a host with `qemu-system-aarch64`. No timer IRQ is enabled by default.
+Still limited: TCP is a bounded client only (no listen/accept, congestion control, options negotiation, or out-of-order reassembly); HTTPS/TLS is not implemented; UDP/TCP handles are separate from file descriptors; DNS resolves A records only; configuration is static (QEMU user-net default); IPv4 fragments are rejected; and real QEMU packet exchange must still be tested on a host with `qemu-system-x86_64`. No timer IRQ is enabled by default.
 
 
 ## P4 SMP, driver and framebuffer foundations (v1.10.0)
@@ -142,17 +156,17 @@ Implemented in this increment:
 - atomic acquire/release spinlock and try-lock primitives, documented as groundwork only
 - framebuffer surface bounds handling, clearing of glyph background pixels, cursor clamping, and text-row scrolling
 - host framebuffer tests using a caller-supplied RAM surface (no fixed physical address touched by host tests)
-- VirtIO-Net RX descriptor length checks, no silent frame truncation, and buffer recycling for rejected but validly indexed packets
+- virtio-net RX descriptor length checks, no silent frame truncation, and buffer recycling for rejected but validly indexed packets
 - `smp` and `fbinfo` shell diagnostics
 - GitHub Actions CI for clean build, host regression tests, and release verification
 
-Not implemented: secondary CPU release, per-CPU stacks/state, interrupt routing for multiple CPUs, system-wide SMP locking, general USB/HID input, a full desktop window manager, dynamic RPK execution, or timer preemption. The current QEMU pixel UI is a single-screen built-in launcher using ramfb plus a polled VirtIO keyboard/tablet path. Do not enable SMP by editing only the online CPU count; the boot and driver invariants must be completed together.
+Not implemented: secondary CPU release, per-CPU stacks/state, interrupt routing for multiple CPUs, system-wide SMP locking, general USB/HID input, a full desktop window manager, dynamic RPK execution, or timer preemption. Do not enable SMP by editing only the online CPU count; the boot and driver invariants must be completed together.
 
 
-## Pixel UI foundation (v1.11.0)
+## Terminal window and live timer IRQ (v1.13.0)
 
-- Added a QEMU `ramfb` XRGB8888 renderer configured through `fw_cfg` DMA.
-- Added separate boot, lock screen, home screen, app router, and Terminal/Calculator/Clock/Files/Launcher modules under `ui/`.
-- Added and image-packaged five `/apps/*.rpk` built-in-app manifests with release checks.
-- Added `linux/run-ui.sh` and `windows/run-ui.ps1`; the established headless serial runners remain unchanged.
-- QEMU-window keyboard and pointer input use VirtIO keyboard/tablet devices; UART remains a fallback. General USB/HID input, dynamic package execution, and the broader Bash/POSIX shell remain future work. Do not claim runtime stability until the graphical boot and navigation matrix has been tested on QEMU.
+- Removed the pixel UI (`ui/`, `apps/*.rpk`, `assets/`, `run-ui` scripts, UI docs and tests).
+- Added a framebuffer text terminal (`drivers/console.cpp`) with DejaVu Sans Mono, Linux-console colours, ANSI handling, 2000-line scrollback and mouse-wheel / Shift+PageUp scrolling; `run-terminal` shows only the shell in the QEMU window.
+- Enabled the 100 Hz timer IRQ at boot and while ring 3 programs run (`IF set`); it only counts ticks - preemptive process switching is still deferred.
+- Still needs a runtime acceptance run on `qemu-system-x86_64`.
+

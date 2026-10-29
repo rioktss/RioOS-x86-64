@@ -1,6 +1,6 @@
 # RioOS Architecture
 
-RioOS is intentionally organized as a small collection of cooperating kernel subsystems. The implementation is written mostly in freestanding C++ with AArch64 Assembly for the lowest-level entry and context-switch paths.
+RioOS is intentionally organized as a small collection of cooperating kernel subsystems. The implementation is written mostly in freestanding C++ with x86-64 Assembly for the lowest-level entry and context-switch paths.
 
 ## Design goals
 
@@ -16,8 +16,8 @@ RioOS currently aims to be:
 
 ```text
                          ┌─────────────────────┐
-                         │      QEMU virt       │
-                         │     ARM64 machine    │
+                         │      QEMU pc        │
+                         │     x86-64 machine    │
                          └──────────┬──────────┘
                                     │
                   ┌─────────────────┼─────────────────┐
@@ -56,7 +56,7 @@ QEMU loads kernel
 boot/boot.S
       │
       ▼
-AArch64 early setup
+x86-64 early setup
       │
       ├── stack / CPU setup
       ├── early console support
@@ -84,11 +84,11 @@ The exact initialization order can change as the kernel evolves. The authoritati
 
 ## Cooperative threads and interrupt policy
 
-`process/thread.cpp` and `process/ctx_switch.S` implement a small AArch64 cooperative thread facility. A thread gives up the CPU explicitly through `thread_yield()`, and the context switch saves/restores the AAPCS64 callee-saved register set and stack pointer. `thread-demo` exercises this path without unmasking CPU IRQs or enabling timer interrupts.
+`process/thread.cpp` and `process/ctx_switch.S` implement a small x86-64 cooperative thread facility. A thread gives up the CPU explicitly through `thread_yield()`, and the context switch saves/restores the AAPCS64 callee-saved register set and stack pointer. `thread-demo` exercises this path without unmasking CPU IRQs or enabling timer interrupts.
 
-This must not be confused with complete preemptive multitasking: the process table scheduler is still primarily process metadata/policy, and the current EL0 execution path runs one user program synchronously. Periodic timer IRQs remain disabled during boot because interrupt-driven preemption has not been validated for interactive input.
+This must not be confused with complete preemptive multitasking: the process table scheduler is still primarily process metadata/policy, and the current ring 3 execution path runs one user program synchronously. The periodic timer IRQ (100 Hz) is active from boot but only counts scheduler ticks; preemptive switching is not enabled.
 
-## AArch64 exception and interrupt model
+## x86-64 exception and interrupt model
 
 Low-level exception entry is implemented in Assembly and connected to C++ exception/interrupt handling.
 
@@ -104,7 +104,7 @@ include/interrupt.h
 include/timer.h
 ```
 
-RioOS targets a QEMU `virt` machine configured with GICv2 and a Generic Timer. This allows the project to experiment with hardware-style interrupt delivery without requiring physical ARM hardware.
+RioOS targets a QEMU PC (i440FX) machine: 8259 PIC + 8254 PIT (100 Hz tick), PS/2 keyboard/mouse, Bochs VBE linear framebuffer, ATA PIO disk and legacy virtio-net over PCI.
 
 ## Memory management
 
@@ -121,10 +121,10 @@ include/page_alloc.h
 
 The build is freestanding: the kernel is not linked against a normal host C++ runtime.
 
-The project uses the AArch64 bare-metal target:
+The project uses the x86-64 bare-metal target:
 
 ```text
---target=aarch64-none-elf
+--target=x86_64-unknown-none-elf
 ```
 
 and builds the kernel with options suitable for a freestanding environment, including disabled C++ exceptions/RTTI and no host standard library.
@@ -162,7 +162,7 @@ The scheduler is an active development area, so the implementation details shoul
 
 ## System calls and userspace
 
-The syscall interface is represented by the syscall layer in the kernel and corresponding userspace support. File-descriptor syscalls (`open`, `close`, `read`, `write`, `seek`) share a bounded kernel descriptor table; descriptors 0/1/2 map to polled UART input and UART output/error. User pointers are validated before buffer access. Since EL0 programs still run one at a time, the table is reset on each userspace entry/return and is not yet a separate table per process.
+The syscall interface is represented by the syscall layer in the kernel and corresponding userspace support. File-descriptor syscalls (`open`, `close`, `read`, `write`, `seek`) share a bounded kernel descriptor table; descriptors 0/1/2 map to polled UART input and UART output/error. User pointers are validated before buffer access. Since ring 3 programs still run one at a time, the table is reset on each userspace entry/return and is not yet a separate table per process.
 
 A simplified path looks like:
 
@@ -173,7 +173,7 @@ User program
 userspace interface
     │
     ▼
-AArch64 exception / syscall entry
+x86-64 exception / syscall entry
     │
     ▼
 kernel/syscall.cpp
@@ -185,7 +185,7 @@ validated kernel operation
 return to userspace
 ```
 
-ELF loading is handled by the process/ELF subsystem. Bundled userspace programs are built as AArch64 ELF artifacts by `build.sh` and copied into the filesystem image.
+ELF loading is handled by the process/ELF subsystem. Bundled userspace programs are built as x86-64 ELF artifacts by `linux/build.sh` and copied into the filesystem image.
 
 ## Filesystem and storage
 
@@ -234,7 +234,7 @@ The network side is organized around the VirtIO network device and a small netwo
 QEMU user networking
         │
         ▼
-VirtIO net device
+virtio-net PCI device (legacy, polled)
         │
         ▼
 drivers/virtio_net.cpp
@@ -252,12 +252,11 @@ Hardware-facing code lives primarily under `drivers/`:
 ```text
 uart.cpp
 keyboard.cpp
-storage.cpp
-virtio_mmio.cpp
-virtio_blk.cpp
+storage.cpp        (ATA PIO)
 virtio_net.cpp
-fb.cpp
-font.cpp
+fb.cpp             (Bochs VBE)
+console.cpp
+console_font.cpp
 ```
 
 This separation makes it easier to reason about the boundary between generic kernel services and QEMU/virtio-specific hardware interfaces.
@@ -287,9 +286,9 @@ See [`../tests/TEST_MATRIX.md`](../tests/TEST_MATRIX.md).
 | Where are file descriptors? | `kernel/fd.cpp`, `include/fd.h`, `include/user_api.h` |
 | How are ELF programs loaded? | `process/elf.cpp` |
 | Where is the filesystem? | `fs/` |
-| Where are block/network drivers? | `drivers/virtio_*.cpp`, `drivers/storage.cpp` |
-| How are user programs built? | `userspace/`, `build.sh` |
-| How is the kernel linked? | `linker.ld` |
+| Where are block/network drivers? | `drivers/storage.cpp` (ATA), `drivers/virtio_net.cpp` |
+| How are user programs built? | `userspace/`, `linux/build.sh` |
+| How is the kernel linked? | `boot/linker.ld` |
 | How is QEMU launched? | `linux/run.sh`, `windows/run.ps1` |
 
 ## Architectural philosophy
@@ -319,13 +318,13 @@ See [P0_HARDENING.md](./P0_HARDENING.md) for the safety invariants, verification
 
 ## CPU and framebuffer status (v1.10.0)
 
-The P4 SMP API reads `MPIDR_EL1.Aff0` for diagnostics and provides atomic spinlock primitives. The production state remains one online CPU; secondary CPUs are not launched and the locks are groundwork, not evidence that all existing drivers are SMP-safe. Timer IRQ remains disabled in normal boot.
+The P4 SMP API reports the single boot CPU (id 0) for diagnostics and provides atomic spinlock primitives. The production state remains one online CPU; secondary CPUs are not launched and the locks are groundwork, not evidence that all existing drivers are SMP-safe. The 100 Hz PIT timer IRQ is active in normal boot.
 
 The framebuffer driver is a bounded software RAM surface at the address reserved by the memory layout. It supports text glyphs, background clearing, and row scrolling, but the default `-nographic` QEMU runner does not connect this RAM to a display device. UART remains the supported interactive console until a real display backend is implemented and tested.
 
 
-## Pixel UI and display path (v1.11.0)
+## Terminal window and live timer IRQ (v1.13.0)
 
-`drivers/fb.cpp` now provides clipped pixel primitives, bitmap text drawing, gradients, rounded panels, cache maintenance, and a direct QEMU `ramfb` setup path using the `fw_cfg` DMA interface. The framebuffer is a statically reserved 1024×768 XRGB8888 buffer, avoiding allocator ownership and lifetime problems. The boot splash, lock screen, home screen, app router, and each app have separate translation units under `ui/`.
+`drivers/fb.cpp` only owns the 1024x768 XRGB8888 surface and the Bochs/QEMU VBE linear framebuffer found over PCI. `drivers/console.cpp` is a VT100-subset text terminal with a 2000-line scrollback ring and a lazy cell-diff renderer; `uart_putc()` mirrors every byte into it once active, so the QEMU window shows exactly what the serial shell shows. Mouse-wheel (PS/2 IntelliMouse) and PageUp/PageDown events from the PS/2 driver call `console_scroll_lines()`. There is no GUI layer. See [TERMINAL.md](./TERMINAL.md).
 
-`run-ui.sh` adds `-device ramfb` and a graphical QEMU display while keeping PL011 UART attached to stdio as a fallback. Normal `run.sh` remains headless and is backward-compatible. The runner attaches VirtIO keyboard and tablet devices; the polled driver reads their advertised identity and absolute-coordinate ranges. The built-in `.rpk` manifests are installed into `/apps` at image-build time and validated before launch; app code is currently built into the kernel. General USB/HID devices, dynamically loaded RPK executables, and a full GNU Bash userspace are not implemented. Runtime rendering and input still need a visual QEMU acceptance run on a host with display support.
+The generic timer runs as a 100 Hz periodic system tick from boot; ring 3 is entered with the I-bit clear and the lower-EL IRQ vector saves/restores a full frame. See [TIMER_IRQ.md](./TIMER_IRQ.md).

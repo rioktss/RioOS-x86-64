@@ -2,7 +2,6 @@
 #include "fs.h"
 #include "uart.h"
 #include "keyboard.h"
-#include "fb.h"
 #include "string.h"
 
 static SecurityRole current_role = SECURITY_USER;
@@ -95,7 +94,6 @@ int security_read_password(char* out, uint64_t cap)
         {
             out[length] = '\0';
             uart_puts("\r\n");
-            if (!uart_output_hook_active()) fb_print("\r\n", 0xFFFFFF);
             return (int)length;
         }
 
@@ -106,7 +104,6 @@ int security_read_password(char* out, uint64_t cap)
                 --length;
                 out[length] = '\0';
                 uart_puts("\b \b");
-                if (!uart_output_hook_active()) fb_putc('\b', 0xFFFFFF);
             }
             continue;
         }
@@ -117,7 +114,6 @@ int security_read_password(char* out, uint64_t cap)
             out[length] = '\0';
             /* Do not echo the actual password. */
             uart_putc('*');
-            if (!uart_output_hook_active()) fb_putc('*', 0xFFFFFF);
         }
     }
 }

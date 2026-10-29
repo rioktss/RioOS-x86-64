@@ -1,41 +1,34 @@
-/* Kernel thread context switch (AArch64).
-   Saves/restores the AAPCS64 callee-saved registers x19-x30 plus SP.
-   Placed in plain .text so linker.ld's *(.text) picks it up. */
 .section .text, "ax"
+.code64
 .global thread_context_switch
 .global thread_trampoline
 .extern thread_entry_hook
 .extern thread_exit
-
-/* void thread_context_switch: x0 = old_sp_out, x1 = new_sp */
+/* SysV x86-64: rdi = old SP slot, rsi = new saved stack pointer. */
 thread_context_switch:
-    sub sp, sp, #96
-    stp x19, x20, [sp, #0]
-    stp x21, x22, [sp, #16]
-    stp x23, x24, [sp, #32]
-    stp x25, x26, [sp, #48]
-    stp x27, x28, [sp, #64]
-    stp x29, x30, [sp, #80]
-
-    mov x9, sp
-    str x9, [x0]
-
-    mov sp, x1
-    ldp x19, x20, [sp, #0]
-    ldp x21, x22, [sp, #16]
-    ldp x23, x24, [sp, #32]
-    ldp x25, x26, [sp, #48]
-    ldp x27, x28, [sp, #64]
-    ldp x29, x30, [sp, #80]
-    add sp, sp, #96
+    pushq %rbp
+    pushq %rbx
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq %rsp, (%rdi)
+    movq %rsi, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbx
+    popq %rbp
     ret
-
-/* First code run by a new thread: x19 = entry, x20 = argument. */
+/* Initial synthetic context keeps entry in r12 and argument in r13. */
 thread_trampoline:
-    bl thread_entry_hook
-    mov x0, x20
-    blr x19
-    bl thread_exit
-1:
-    wfe
-    b 1b
+    /* Entry RSP is 8 mod 16; realign before ABI-conforming C calls. */
+    subq $8, %rsp
+    call thread_entry_hook
+    movq %r13, %rdi
+    call *%r12
+    call thread_exit
+1:  cli
+    hlt
+    jmp 1b

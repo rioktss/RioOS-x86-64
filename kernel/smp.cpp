@@ -7,14 +7,8 @@ static int smp_enabled_flag = 0;
 
 void smp_init()
 {
-#ifdef HOST_TEST
-    /* Host tests do not have access to MPIDR_EL1. */
+    /* Single boot CPU (id 0); secondary cores are not started on x86-64. */
     current_cpu_id = 0;
-#else
-    uint64_t mpidr = 0;
-    asm volatile("mrs %0, MPIDR_EL1" : "=r"(mpidr));
-    current_cpu_id = (uint32_t)(mpidr & 0xFFU);
-#endif
     online_cpus = 1;
     smp_enabled_flag = 0;
 }
@@ -35,7 +29,7 @@ void smp_spin_lock(SmpSpinlock* lock)
     while (__atomic_exchange_n(&lock->value, 1U, __ATOMIC_ACQUIRE) != 0U)
     {
 #ifndef HOST_TEST
-        asm volatile("yield" ::: "memory");
+        asm volatile("pause" ::: "memory");
 #endif
     }
 }
