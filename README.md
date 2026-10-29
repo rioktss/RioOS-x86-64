@@ -20,6 +20,13 @@
 [![License](https://img.shields.io/badge/license-MIT-blue)](./docs/LICENSE)
 [![Status](https://img.shields.io/badge/status-work%20in%20progress-orange)](#project-status)
 
+
+# RioOS Preview
+
+![RioOS Preview](docs/img/view.jpg)
+
+*RioOS running on QEMU system x86-64*
+
 ## About RioOS
 
 RioOS is an educational **bare-metal x86-64 operating-system project**. It boots the custom MyKernel kernel directly in QEMU rather than running as a Linux application. The host operating system supplies the compiler, linker, tests, and QEMU; the guest kernel is freestanding C++17 plus assembly.
