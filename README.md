@@ -13,8 +13,6 @@
   <a href="./docs/ROADMAP.md">Roadmap</a>
 </p>
 
-> 🇮🇩 Made in Indonesia. Built to be studied, improved, and shared.
-
 [![Architecture](https://img.shields.io/badge/architecture-x86--64-informational)](https://github.com/rioktss/RioOS)
 [![Target](https://img.shields.io/badge/target-QEMU%20pc-success)](https://www.qemu.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](./docs/LICENSE)
@@ -168,4 +166,3 @@ RioOS is released under the [MIT License](./docs/LICENSE).
 
 ---
 
-**RioOS • MyKernel • x86-64 • Bare Metal • QEMU • Open Source • Indonesia 🇮🇩**
