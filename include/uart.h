@@ -27,6 +27,8 @@
 
 typedef void (*uart_output_hook_t)(char value);
 typedef void (*uart_output_flush_hook_t)();
+typedef int (*uart_job_key_filter_t)(int);
+struct UartProbeState { const char* name; int len; int hit; };
 
 void uart_putc(char c);
 void uart_puts(const char* s);
@@ -43,5 +45,10 @@ void uart_clear_output_hook();
 int uart_output_hook_active();
 void uart_set_output_flush_hook(uart_output_flush_hook_t hook);
 void uart_flush_output();
+void uart_init();
+int uart_at_line_start(void);
+void uart_error_probe_begin(const char* name, int len, UartProbeState* save);
+int uart_error_probe_end(const UartProbeState* restore);
+void uart_poll_job_keys(int (*filter)(int));
 
 #endif

@@ -139,7 +139,7 @@ int main(){
         CHECK(fs_read_file(owned, root, readbuf, sizeof(readbuf), &readsize) == 0);
         CHECK(readsize == 5 && readbuf[0] == 'a' && readbuf[1] == 'b' && readbuf[2] == 'c' && readbuf[3] == 0 && readbuf[4] == 0);
         CHECK(fs_truncate(owned, root, 1) == 0);
-        CHECK(fs_truncate(owned, root, 1048577ULL) == -27);
+        CHECK(fs_truncate(owned, root, 4194305ULL) == -27);
 
         /* Search permission must be required before processing dot-dot. */
         fs_set_credentials(1000U, 1000U);
@@ -216,7 +216,9 @@ int main(){
         CHECK(fwrite(impossible_size, 1, sizeof(impossible_size), g_file) == sizeof(impossible_size));
         CHECK(fflush(g_file) == 0);
         fs_init();
-        CHECK(fs_persistent() == 0);
+        /* The extended filesystem runs fsck during mount and drops the
+           corrupt inode instead of forcing the entire volume offline. */
+        CHECK(fs_persistent() == 1);
         CHECK(fs_resolve("/p2-corrupt-size.bin", fs_get_root()) < 0);
     }
 

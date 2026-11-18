@@ -24,6 +24,9 @@
 
 #include "fd.h"
 #include "fs.h"
+#include "process.h"
+#include "netstack.h"
+#include "tty.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,6 +72,46 @@ int storage_write_sector(uint64_t sector, const void* buffer)
     return fflush(disk) == 0 ? 0 : -1;
 }
 int storage_flush() { return disk && fflush(disk) == 0 ? 0 : -1; }
+
+/* Optional kernel integrations not exercised by this file-descriptor test. */
+uint64_t timer_millis() { return 0; }
+uint64_t process_rlimit_cur(int, int) { return ~0ULL; }
+int process_sig_raise(int, int) { return 0; }
+int process_sig_raise_info(int, int, int, int, uint64_t) { return 0; }
+int process_sig_info_get(int, int, int*, int*, uint64_t*) { return -11; }
+int process_sig_take_set(int, uint32_t) { return -11; }
+uint32_t process_sig_pending_raw(int) { return 0; }
+uint32_t process_sig_serial(int) { return 0; }
+uint32_t process_uid(int) { return 0; }
+int64_t tty_read(uint8_t* outbuf, uint64_t cap)
+{
+    uint64_t n = 0;
+    while (n < cap) { int c = uart_try_getc(); if (c < 0) break; outbuf[n++] = (uint8_t)c; }
+    return (int64_t)n;
+}
+int tty_poll() { return uart_has_data(); }
+int net_tcp_socket(int) { return -19; }
+int net_tcp_connect(int, int, uint32_t, uint16_t, uint32_t) { return -19; }
+int net_tcp_send(int, int, const void*, uint32_t, uint32_t) { return -19; }
+int net_tcp_recv(int, int, void*, uint32_t, uint32_t) { return -19; }
+int net_tcp_close(int, int) { return -19; }
+void net_tcp_close_all_for(int) {}
+int net_tcp_poll(int, int) { return 32; }
+uint32_t net_tcp_gen(int, int) { return 0; }
+int net_tcp_shutdown_wr(int, int) { return -19; }
+int net_tcp_info(int, int, uint32_t*, uint16_t*, uint16_t*) { return -19; }
+int net_tcp_listen(int, int, uint16_t) { return -19; }
+int net_tcp_accept(int, int, uint32_t*, uint16_t*, uint32_t) { return -19; }
+int net_udp_socket(int) { return -19; }
+int net_udp_bind(int, int, uint16_t) { return -19; }
+int net_udp_sendto(int, int, uint32_t, uint16_t, const void*, uint32_t) { return -19; }
+int net_udp_recvfrom(int, int, uint32_t*, uint16_t*, void*, uint32_t, uint32_t) { return -19; }
+int net_udp_close(int, int) { return -19; }
+void net_udp_close_all_for(int) {}
+int net_udp_poll(int, int) { return 32; }
+uint32_t net_udp_gen(int, int) { return 0; }
+int net_udp_local_port(int, int) { return -19; }
+int net_poll_once() { return 0; }
 
 #define CHECK(c) do { if (!(c)) { printf("FD HOST TEST FAIL line %d: %s\n", __LINE__, #c); return 1; } } while (0)
 

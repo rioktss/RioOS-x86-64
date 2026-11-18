@@ -28,6 +28,8 @@
 #include "user.h"
 #include "fd.h"
 #include "netstack.h"
+#include "process.h"
+#include "tty.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -64,9 +66,42 @@ int net_tcp_send(int, int, const void*, uint32_t length, uint32_t) { return (int
 int net_tcp_recv(int, int, void*, uint32_t, uint32_t) { return -110; }
 int net_tcp_close(int, int) { return 0; }
 void net_tcp_close_all_for(int) {}
+int net_tcp_poll(int, int) { return 0; }
+int net_udp_poll(int, int) { return 0; }
+uint32_t net_tcp_gen(int, int) { return 0; }
+uint32_t net_udp_gen(int, int) { return 0; }
+int net_tcp_shutdown_wr(int, int) { return 0; }
+int net_tcp_info(int, int, uint32_t* ip, uint16_t* rp, uint16_t* lp)
+{ if (ip) *ip = 0; if (rp) *rp = 0; if (lp) *lp = 0; return -9; }
+int net_udp_local_port(int, int) { return -9; }
+int net_tcp_listen(int, int, uint16_t) { return -95; }
+int net_tcp_accept(int, int, uint32_t*, uint16_t*, uint32_t) { return -95; }
+int net_poll_once() { return 0; }
+
+/* fd.cpp also includes process/TTY integrations; these are deliberately inert
+   in the standalone syscall ABI test, which supplies its own PID and input. */
+uint64_t process_rlimit_cur(int, int) { return ~0ULL; }
+int process_sig_raise(int, int) { return 0; }
+int process_sig_raise_info(int, int, int, int, uint64_t) { return 0; }
+int process_sig_info_get(int, int, int*, int*, uint64_t*) { return -11; }
+int process_sig_take_set(int, uint32_t) { return -11; }
+uint32_t process_sig_pending_raw(int) { return 0; }
+uint32_t process_sig_serial(int) { return 0; }
+uint32_t process_uid(int) { return 0; }
+int64_t tty_read(uint8_t* outbuf, uint64_t cap)
+{
+    uint64_t n = 0;
+    while (n < cap) { int c = uart_try_getc(); if (c < 0) break; outbuf[n++] = (uint8_t)c; }
+    return (int)n;
+}
+int tty_poll() { return 0; }
 
 /* Fake single-file filesystem: only "/storage/home/hello" exists after a write. */
 static uint8_t fake_file[4096]; static uint64_t fake_size = 0; static int fake_exists = 0;
+void (*fs_event_hook)(int, int, const char*, uint32_t, uint32_t) = 0;
+int fs_resolve_nofollow(const char* path, int cwd) { return fs_resolve(path, cwd); }
+int fs_get_parent(int) { return 0; }
+const char* fs_get_name(int) { return "hello"; }
 int fs_get_root() { return 0; }
 static int fake_cwd = 7; static int seen_cwd = -1;
 int fs_resolve(const char* path, int cwd)

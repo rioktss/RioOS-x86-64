@@ -121,7 +121,7 @@ static void put_datetime(uint64_t seconds)
 static void put_permissions(int id)
 {
     uint32_t mode = fs_get_mode(id) & 0777U;
-    uart_putc(fs_get_type(id) == FS_DIR ? 'd' : '-');
+    uart_putc(fs_get_type(id) == FS_DIR ? 'd' : (fs_get_type(id) == FS_SYMLINK ? 'l' : '-'));
     const uint32_t bits[9] = {0400U,0200U,0100U, 0040U,0020U,0010U, 0004U,0002U,0001U};
     const char chars[9] = {'r','w','x','r','w','x','r','w','x'};
     for (int i = 0; i < 9; ++i)
@@ -134,6 +134,14 @@ static void ls_entry_short(int id)
     {
         uart_puts("[DIR]  ");
         uart_puts(fs_get_name(id));
+    }
+    else if (fs_get_type(id) == FS_SYMLINK)
+    {
+        char t[260];
+        uart_puts("[LINK] ");
+        uart_puts(fs_get_name(id));
+        uart_puts(" -> ");
+        uart_puts(fs_link_target_of(id, t, sizeof(t)) > 0 ? t : "?");
     }
     else
     {
@@ -157,6 +165,12 @@ static void ls_entry_long(int id)
     put_datetime(fs_get_mtime(id));
     uart_putc(' ');
     uart_puts(fs_get_name(id));
+    if (fs_get_type(id) == FS_SYMLINK)
+    {
+        char t[260];
+        uart_puts(" -> ");
+        uart_puts(fs_link_target_of(id, t, sizeof(t)) > 0 ? t : "?");
+    }
     uart_puts("\r\n");
 }
 
@@ -308,7 +322,7 @@ void vfs_ls(const char* spec)
     }
 
     int id = operand[0] ? fs_resolve(operand, current_directory) : current_directory;
-    if (id < 0) { uart_puts("ls: not found or permission denied\r\n"); return; }
+    if (id < 0 || fs_get_type(id) < 0) { uart_puts("ls: not found or permission denied\r\n"); return; }   /* (also: cwd removed behind our back) */
 
     if (fs_get_type(id) == FS_DIR &&
         fs_check_access(id, FS_ACCESS_READ | FS_ACCESS_EXEC) != 0)
@@ -334,6 +348,8 @@ void vfs_ls(const char* spec)
         ls_directory(id, long_format, show_hidden);
     }
 }
+
+void vfs_path_of(int id, char* out, int capacity) { build_path(id, out, capacity); }
 
 void vfs_get_path(char* out, int capacity)
 {
@@ -399,6 +415,7 @@ static void tree_recursive(int id, int depth)
     }
     for (int i = 0; i < depth; ++i) uart_puts("  ");
     if (fs_get_type(id) == FS_DIR) uart_puts("[DIR]  ");
+    else if (fs_get_type(id) == FS_SYMLINK) uart_puts("[LINK] ");
     else uart_puts("[FILE] ");
     uart_puts(fs_get_name(id));
     if (fs_get_type(id) == FS_FILE)
@@ -412,6 +429,22 @@ static void tree_recursive(int id, int depth)
     {
         int child = fs_get_child(id, i);
         if (child >= 0) tree_recursive(child, depth + 1);
+    }
+}
+
+void vfs_tree_path(const char* path)
+{
+    if (!path || !path[0]) { vfs_tree(); return; }
+    int id = fs_resolve(path, current_directory);
+    if (id < 0) { uart_puts("tree: path not found\r\n"); return; }
+    if (fs_get_type(id) != FS_DIR) { uart_puts(path); uart_puts("\r\n"); return; }
+    if (fs_check_access(id, FS_ACCESS_READ | FS_ACCESS_EXEC) != 0) { uart_puts("tree: permission denied\r\n"); return; }
+    uart_puts(path); uart_puts("\r\n");
+    int count = fs_get_child_count(id);
+    for (int i = 0; i < count; ++i)
+    {
+        int child = fs_get_child(id, i);
+        if (child >= 0) tree_recursive(child, 1);
     }
 }
 

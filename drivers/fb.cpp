@@ -196,3 +196,5 @@ uint32_t fb_test_pixel(int x, int y)
     return fb_base[(uint64_t)y * (uint64_t)fb_w + (uint64_t)x];
 }
 #endif
+
+const char* fb_backend_name() { return fb_has_display() ? "x86 VBE/Bochs linear framebuffer" : "serial-only"; }

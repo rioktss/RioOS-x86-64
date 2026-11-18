@@ -40,6 +40,8 @@
 #include "interrupt.h"
 #include "page_alloc.h"
 #include "security.h"
+#include "random.h"
+#include "tty.h"
 #include "smp.h"
 #include "version.h"
 #include "fb.h"
@@ -108,6 +110,8 @@ extern "C" void kernel_main()
     /* The counter is needed by every timeout path, so bring it up early. */
     uart_puts("[4] Initializing timer...\r\n");
     timer_init();
+    /* Seed the kernel DRBG early; the persistent seed is loaded after FS init. */
+    random_init();
     /* Timer is armed after the interrupt controller is up (step 15). */
 
     uart_puts("[5] Initializing MMU...\r\n");
@@ -125,6 +129,7 @@ extern "C" void kernel_main()
 
     uart_puts("[8] Initializing filesystem...\r\n");
     fs_init();
+    random_seed_load();
 
     uart_puts("[9] Initializing VFS...\r\n");
     vfs_init();
@@ -135,6 +140,7 @@ extern "C" void kernel_main()
 
     uart_puts("[11] Initializing keyboard...\r\n");
     keyboard_init();
+    tty_reset();
 
     uart_puts("[12] Initializing scheduler...\r\n");
     scheduler_init();

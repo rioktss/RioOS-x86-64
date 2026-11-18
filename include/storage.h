@@ -33,5 +33,11 @@ int storage_read_sector(uint64_t sector, void* buffer);
 int storage_write_sector(uint64_t sector, const void* buffer);
 int storage_flush();
 void storage_status();
+int storage_backend(); /* x86: 4 = ATA PIO; AArch64 backends use 1..3 */
+/* Raw device interface used by FAT32 and secondary filesystem mounts. */
+int storage_dev_read(int dev, uint64_t sector, void* buffer);
+int storage_dev_write(int dev, uint64_t sector, const void* buffer);
+int storage_dev_flush(int dev);
+uint64_t storage_dev_sectors(int dev);
 
 #endif

@@ -148,3 +148,25 @@ void storage_status()
     if (ata_online) uart_puts("Storage: ATA PIO primary master (LBA28/LBA48 identify, polling).\r\n");
     else uart_puts("Storage offline; filesystem uses RAM fallback.\r\n");
 }
+
+/* Backend id 4 identifies the x86 legacy ATA PIO controller. */
+int storage_backend() { return ata_online ? 4 : 0; }
+
+/* Device 0 is the primary ATA disk. Secondary device IDs are reserved for
+   future PCI/NVMe/AHCI transports and correctly report unavailable for now. */
+int storage_dev_read(int dev, uint64_t sector, void* buffer)
+{
+    return dev == 0 ? storage_read_sector(sector, buffer) : -1;
+}
+int storage_dev_write(int dev, uint64_t sector, const void* buffer)
+{
+    return dev == 0 ? storage_write_sector(sector, buffer) : -1;
+}
+int storage_dev_flush(int dev)
+{
+    return dev == 0 ? storage_flush() : -1;
+}
+uint64_t storage_dev_sectors(int dev)
+{
+    return (dev == 0 && ata_online) ? ata_sectors : 0;
+}

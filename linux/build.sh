@@ -86,6 +86,7 @@ if [[ "$CLEAN" -eq 1 ]]; then
     rm -f "$HOST_TOOLS"/process_host_test
     rm -f "$HOST_TOOLS"/scheduler_process_host_test
     rm -f "$HOST_TOOLS"/smp_host_test "$HOST_TOOLS"/console_host_test
+    rm -f "$HOST_TOOLS"/{fs_crash_test,fs9p_host_test,sha_host_test,crypto_host_test,sshkey_host_test,tls_host_test,x509_host_test,textutil_host_test}
 fi
 
 src_of() {
@@ -115,6 +116,9 @@ MODULES=(
     commands version shell history env rtc exceptions syscall user mmu storage thread fd
     fb console console_font
     elf virtio_net netstack page_alloc fault diag security smp gdt runtime
+    filters jobs netserv random script sha256 shellext textutil textutils tty task_x86
+    crypto ssh sshkey tls trust x509 fat32
+    x86_optional_devices
     kernel
 )
 
@@ -202,6 +206,12 @@ step "8/9" "Running host tests"
     -o "$HOST_TOOLS/fs_host_test"
 "$HOST_TOOLS/fs_host_test" > /dev/null
 
+# Portable 9p filesystem layer, exercised against its fake transport.
+"$CXX" -std=c++17 -O2 -Wall -Wextra -iquote include -DHOST_TEST \
+    tests/fs9p_host_test.cpp fs/fs.cpp kernel/string.cpp kernel/rtc.cpp \
+    -o "$HOST_TOOLS/fs9p_host_test"
+"$HOST_TOOLS/fs9p_host_test" > /dev/null
+
 "$CXX" -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -iquote include -DHOST_TEST \
     tests/net_host_test.cpp net/netstack.cpp \
     -o "$HOST_TOOLS/net_host_test"
@@ -256,6 +266,37 @@ step "8/9" "Running host tests"
     tests/smp_host_test.cpp kernel/smp.cpp \
     -o "$HOST_TOOLS/smp_host_test"
 "$HOST_TOOLS/smp_host_test" > /dev/null
+
+# Host validation for the portable crypto, password, SSH key, TLS, X.509 and text code.
+"$CXX" -std=c++17 -O2 -iquote include -DHOST_TEST \
+    tests/sha_host_test.cpp kernel/sha256.cpp -o "$HOST_TOOLS/sha_host_test"
+"$HOST_TOOLS/sha_host_test" > /dev/null
+
+"$CXX" -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -iquote include -DHOST_TEST \
+    tests/crypto_host_test.cpp net/crypto.cpp kernel/sha256.cpp -o "$HOST_TOOLS/crypto_host_test"
+"$HOST_TOOLS/crypto_host_test" tests/crypto_vectors.txt > /dev/null
+
+"$CXX" -std=c++17 -O2 -iquote include -DHOST_TEST \
+    tests/sshkey_host_test.cpp net/sshkey.cpp net/crypto.cpp kernel/sha256.cpp \
+    -o "$HOST_TOOLS/sshkey_host_test"
+"$HOST_TOOLS/sshkey_host_test" > /dev/null
+
+"$CXX" -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -iquote include -DHOST_TEST \
+    tests/tls_host_test.cpp net/tls.cpp net/x509.cpp net/crypto.cpp kernel/sha256.cpp \
+    -o "$HOST_TOOLS/tls_host_test"
+"$HOST_TOOLS/tls_host_test" > /dev/null
+
+"$CXX" -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -iquote include -DHOST_TEST \
+    tests/textutil_host_test.cpp kernel/textutil.cpp kernel/string.cpp -o "$HOST_TOOLS/textutil_host_test"
+"$HOST_TOOLS/textutil_host_test" > /dev/null
+
+if python3 -c 'import cryptography' >/dev/null 2>&1; then
+    python3 tests/gen_pki.py "$HOST_TOOLS/pki" > /dev/null 2>&1
+    "$CXX" -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -iquote include -DHOST_TEST \
+        tests/x509_host_test.cpp net/x509.cpp net/crypto.cpp kernel/sha256.cpp \
+        -o "$HOST_TOOLS/x509_host_test"
+    "$HOST_TOOLS/x509_host_test" "$HOST_TOOLS/pki" > /dev/null
+fi
 
 "$CXX" -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -iquote include -DHOST_TEST \
     tests/console_host_test.cpp drivers/console.cpp drivers/console_font.cpp drivers/fb.cpp \

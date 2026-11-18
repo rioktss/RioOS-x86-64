@@ -30,7 +30,7 @@
 #include "storage.h"
 #include "process.h"
 #include "timer.h"
-#include "net_device.h"
+#include "virtio_net.h"
 #include "netstack.h"
 #include "page_alloc.h"
 #include "scheduler.h"
@@ -70,14 +70,17 @@ static void print_u64_both(uint64_t value)
         putc_both(buffer[--pos]);
 }
 
-#ifndef MYKERNEL_X86_64
 static uint64_t current_el()
 {
+#if defined(MYKERNEL_X86_64)
+    /* x86-64 does not have ARM exception levels; the kernel runs in ring 0. */
+    return 0;
+#else
     uint64_t value = 0;
     asm volatile("mrs %0, CurrentEL" : "=r"(value));
     return (value >> 2) & 3ULL;
-}
 #endif
+}
 
 static const char MYKERNEL_LOGO[] =
     "                               __\r\n"
@@ -121,10 +124,10 @@ static void print_info()
     puts_both("Kernel        : Mykernel v");
     puts_both(MYKERNEL_VERSION_STRING);
     puts_both("\r\n");
-#ifdef MYKERNEL_X86_64
+#if defined(MYKERNEL_X86_64)
     puts_both("Architecture  : x86-64\r\n");
-    puts_both("Machine       : QEMU pc / q35\r\n");
-    puts_both("CPU           : x86-64 virtual CPU\r\n");
+    puts_both("Machine       : PC / QEMU\r\n");
+    puts_both("CPU           : x86-64 (CPUID)\r\n");
 #else
     puts_both("Architecture  : AArch64\r\n");
     puts_both("Machine       : QEMU virt\r\n");
@@ -139,7 +142,7 @@ static void print_info()
     print_u64_both(heap_total() / 1024ULL);
     puts_both(" KiB total\r\n");
     puts_both("Storage       : ");
-#ifdef MYKERNEL_X86_64
+#if defined(MYKERNEL_X86_64)
     puts_both(storage_ready() ? "ATA PIO (ready)" : "ATA PIO (offline)");
 #else
     puts_both(storage_ready() ? "VirtIO Block (ready)" : "VirtIO Block (offline)");
@@ -151,8 +154,8 @@ static void print_info()
     puts_both("Network       : ");
     if (net_ready())
         puts_both("ready");
-    else if (net_device_present())
-        puts_both("network device detected");
+    else if (virtio_net_present())
+        puts_both("VirtIO-Net detected");
     else
         puts_both("offline");
     puts_both("\r\n");
@@ -172,13 +175,13 @@ static void print_info()
     puts_both("Uptime        : ");
     print_u64_both(timer_seconds());
     puts_both(" s\r\n");
-#ifdef MYKERNEL_X86_64
-    puts_both("Privilege     : ring 0 (kernel)\r\n");
+#if defined(MYKERNEL_X86_64)
+    puts_both("Privilege     : Ring ");
 #else
     puts_both("Current EL    : EL");
+#endif
     print_u64_both(current_el());
     puts_both("\r\n");
-#endif
     puts_both("User          : ");
     puts_both(security_username());
     puts_both("\r\n");

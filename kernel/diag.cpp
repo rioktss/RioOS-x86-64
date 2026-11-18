@@ -105,7 +105,7 @@ static void put_dec(int value)
 void kpanic(const char* message, const char* file, int line)
 {
 #ifndef HOST_TEST
-#ifdef MYKERNEL_X86_64
+#if defined(MYKERNEL_X86_64)
     asm volatile("cli" ::: "memory");
 #else
     asm volatile("msr daifset, #0xf" ::: "memory");
@@ -124,8 +124,8 @@ void kpanic(const char* message, const char* file, int line)
     abort();
 #else
     while (1)
-#ifdef MYKERNEL_X86_64
-        asm volatile("cli; hlt");
+#if defined(MYKERNEL_X86_64)
+        asm volatile("hlt");
 #else
         asm volatile("wfe");
 #endif

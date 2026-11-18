@@ -152,6 +152,7 @@ struct UdpSocketState
     uint16_t queue_head;
     uint16_t queue_count;
     uint32_t dropped;
+    uint32_t generation;
     UdpDatagram queue[UDP_QUEUE_DEPTH];
 };
 
@@ -169,6 +170,7 @@ struct TcpSocketState
     uint32_t rcv_nxt;
     uint16_t rx_head;
     uint16_t rx_count;
+    uint32_t generation;
     uint8_t rx_buffer[TCP_RX_BUFFER_SIZE];
 };
 
@@ -191,6 +193,87 @@ static uint16_t tcp_next_ephemeral = UDP_EPHEMERAL_FIRST;
 static TcpSocketState tcp_sockets[TCP_SOCKET_COUNT];
 static uint16_t dns_query_id = 0x5249U;
 static uint32_t dns_server_ip = DNS_DEFAULT_SERVER;
+
+/* Ordered IPv4 packet filter. Established outbound flows admit their replies. */
+#define FW_MAX_RULES 16
+static NetFwRule fw_rules[FW_MAX_RULES];
+static int fw_default_in = 1, fw_default_out = 1;
+static uint32_t fw_drop_in = 0, fw_drop_out = 0;
+struct FwFlow { uint32_t ip; uint16_t remote_port, local_port; uint8_t proto; uint8_t used; };
+static FwFlow fw_flows[16];
+static int fw_flow_next = 0;
+
+static void fw_note_flow(uint8_t proto, uint32_t ip, uint16_t remote_port, uint16_t local_port)
+{
+    for (int i = 0; i < 16; ++i)
+        if (fw_flows[i].used && fw_flows[i].proto == proto && fw_flows[i].ip == ip &&
+            fw_flows[i].remote_port == remote_port && fw_flows[i].local_port == local_port) return;
+    FwFlow* f = &fw_flows[fw_flow_next];
+    fw_flow_next = (fw_flow_next + 1) & 15;
+    f->used = 1; f->proto = proto; f->ip = ip; f->remote_port = remote_port; f->local_port = local_port;
+}
+static int fw_is_flow(uint8_t proto, uint32_t ip, uint16_t remote_port, uint16_t local_port)
+{
+    for (int i = 0; i < 16; ++i)
+        if (fw_flows[i].used && fw_flows[i].proto == proto && fw_flows[i].ip == ip &&
+            fw_flows[i].remote_port == remote_port && fw_flows[i].local_port == local_port) return 1;
+    return 0;
+}
+static int fw_decide(int dir, uint8_t proto, uint32_t ip, uint16_t port)
+{
+    for (int i = 0; i < FW_MAX_RULES; ++i)
+    {
+        const NetFwRule* r = &fw_rules[i];
+        if (!r->used || (r->dir != 2 && r->dir != dir) || (r->proto && r->proto != proto) ||
+            (r->port && r->port != port)) continue;
+        uint32_t mask = r->prefix == 0 ? 0U : (r->prefix >= 32 ? 0xFFFFFFFFU : (0xFFFFFFFFU << (32U - r->prefix)));
+        if ((ip & mask) == (r->ip & mask)) return r->allow ? 1 : 0;
+    }
+    return dir == 0 ? fw_default_in : fw_default_out;
+}
+static int fw_out_ok(uint8_t proto, uint32_t ip, uint16_t port, uint16_t local_port)
+{
+    if (!fw_decide(1, proto, ip, port)) { ++fw_drop_out; return 0; }
+    if (proto == IP_PROTO_TCP || proto == IP_PROTO_UDP) fw_note_flow(proto, ip, port, local_port);
+    return 1;
+}
+int net_fw_add(const NetFwRule* rule, int position)
+{
+    if (!rule || rule->dir > 2 || rule->prefix > 32 || (rule->proto && rule->proto != 1 && rule->proto != 6 && rule->proto != 17)) return -22;
+    int count = 0;
+    while (count < FW_MAX_RULES && fw_rules[count].used) ++count;
+    if (count == FW_MAX_RULES) return -28;
+    int at = position < 0 || position > count ? count : position;
+    for (int i = count; i > at; --i) fw_rules[i] = fw_rules[i - 1];
+    fw_rules[at] = *rule; fw_rules[at].used = 1;
+    return at;
+}
+int net_fw_del(int index)
+{
+    int count = 0; while (count < FW_MAX_RULES && fw_rules[count].used) ++count;
+    if (index < 0 || index >= count) return -2;
+    for (int i = index; i + 1 < count; ++i) fw_rules[i] = fw_rules[i + 1];
+    fw_rules[count - 1].used = 0;
+    return 0;
+}
+void net_fw_flush() { for (int i = 0; i < FW_MAX_RULES; ++i) fw_rules[i].used = 0; }
+int net_fw_get(int index, NetFwRule* out)
+{
+    if (!out || index < 0) return -22;
+    int count = 0;
+    for (int i = 0; i < FW_MAX_RULES; ++i) if (fw_rules[i].used && count++ == index) { *out = fw_rules[i]; return 0; }
+    return -2;
+}
+void net_fw_set_default(int dir, int allow)
+{
+    if (dir == 0) fw_default_in = allow ? 1 : 0;
+    else if (dir == 1) fw_default_out = allow ? 1 : 0;
+}
+void net_fw_get_state(int* di, int* dout, uint32_t* pi, uint32_t* po)
+{
+    if (di) *di = fw_default_in; if (dout) *dout = fw_default_out;
+    if (pi) *pi = fw_drop_in; if (po) *po = fw_drop_out;
+}
 
 static int arp_resolve(uint32_t ip, uint8_t mac[6], uint32_t timeout_ms);
 static void tcp_input(uint32_t source_ip, uint32_t dest_ip,
@@ -394,6 +477,8 @@ static void udp_input(uint32_t source_ip, uint32_t dest_ip,
         UdpSocketState* socket = &udp_sockets[i];
         if (!socket->used || socket->local_port != dest_port)
             continue;
+        if (!fw_is_flow(IP_PROTO_UDP, source_ip, source_port, dest_port) &&
+            !fw_decide(0, IP_PROTO_UDP, source_ip, dest_port)) { ++fw_drop_in; return; }
         if (socket->queue_count >= UDP_QUEUE_DEPTH)
         {
             if (socket->dropped != 0xFFFFFFFFU) ++socket->dropped;
@@ -408,6 +493,7 @@ static void udp_input(uint32_t source_ip, uint32_t dest_ip,
         for (uint32_t n = 0; n < packet->length; ++n)
             packet->payload[n] = bytes[UDP_HEADER_SIZE + n];
         ++socket->queue_count;
+        ++socket->generation;
         return; /* ports are exclusive: exactly one socket receives a packet */
     }
 }
@@ -771,6 +857,7 @@ static int tcp_send_segment(TcpSocketState* socket, uint8_t flags,
     if (!socket || !socket->used || socket->remote_ip == 0 || socket->remote_port == 0)
         return -22;
     if (payload_length > TCP_SEGMENT_MAX || (payload_length && !payload)) return -90;
+    if (!fw_out_ok(IP_PROTO_TCP, socket->remote_ip, socket->remote_port, socket->local_port)) return -13;
 
     uint32_t next_hop = ((socket->remote_ip & NET_MASK) == (NET_IP & NET_MASK))
         ? socket->remote_ip : NET_GATEWAY;
@@ -849,6 +936,7 @@ static void tcp_input(uint32_t source_ip, uint32_t dest_ip,
     {
         socket->state = TCP_STATE_RESET;
         socket->peer_closed = 1;
+        ++socket->generation;
         return;
     }
 
@@ -886,6 +974,7 @@ static void tcp_input(uint32_t source_ip, uint32_t dest_ip,
                 socket->rx_buffer[(tail + i) % TCP_RX_BUFFER_SIZE] = bytes[header_length + i];
             socket->rx_count = (uint16_t)(socket->rx_count + payload_length);
             socket->rcv_nxt += payload_length;
+            ++socket->generation;
             accepted_payload = 1;
         }
         should_ack = 1; /* ACK duplicates/out-of-order data to request the expected byte. */
@@ -898,6 +987,7 @@ static void tcp_input(uint32_t source_ip, uint32_t dest_ip,
         {
             ++socket->rcv_nxt;
             socket->peer_closed = 1;
+            ++socket->generation;
             if (socket->state == TCP_STATE_FIN_WAIT) socket->state = TCP_STATE_CLOSED;
             else if (socket->state == TCP_STATE_ESTABLISHED) socket->state = TCP_STATE_CLOSE_WAIT;
             should_ack = 1;
@@ -926,6 +1016,7 @@ int net_tcp_socket(int owner_pid)
         socket->remote_ip = 0;
         socket->snd_una = socket->snd_nxt = socket->rcv_nxt = 0;
         socket->rx_head = socket->rx_count = 0;
+        socket->generation = 0;
         return (int)i + 1;
     }
     return -24;
@@ -1208,6 +1299,7 @@ int net_udp_sendto(int owner_pid, int socket_handle, uint32_t target_ip,
         int rc = net_udp_bind(owner_pid, socket_handle, 0);
         if (rc != 0) return rc;
     }
+    if (!fw_out_ok(IP_PROTO_UDP, target_ip, target_port, socket->local_port)) return -13;
 
     uint32_t next_hop = ((target_ip & NET_MASK) == (NET_IP & NET_MASK))
         ? target_ip : NET_GATEWAY;
@@ -1541,6 +1633,7 @@ int net_ping(uint32_t target_ip, uint32_t timeout_ms)
                       : NET_GATEWAY;
 
     uint8_t mac[6];
+    if (!fw_out_ok(IP_PROTO_ICMP, target_ip, 0, 0)) return -13;
     if (arp_resolve(next_hop, mac, timeout_ms / 2) < 0) return -110;
 
     uint16_t ident = 0x4B4D;
@@ -1667,3 +1760,100 @@ void net_status()
 
     uart_puts("\r\n");
 }
+
+/* Extended socket compatibility. The x86 port currently supports TCP clients
+   and UDP sockets. Server-side TCP and DHCP need additional transport work. */
+uint32_t net_local_ip() { return ready_state ? NET_IP : 0U; }
+
+int net_tcp_poll(int owner_pid, int socket_handle)
+{
+    TcpSocketState* s = tcp_get_socket(owner_pid, socket_handle);
+    if (!s) return 32; /* POLLNVAL */
+    int mask = 0;
+    if (s->rx_count || s->peer_closed) mask |= 1;
+    if (s->state == TCP_STATE_ESTABLISHED && !s->peer_closed) mask |= 4;
+    if (s->state == TCP_STATE_RESET) mask |= 8;
+    if (s->state == TCP_STATE_CLOSED || s->peer_closed) mask |= 16;
+    return mask;
+}
+
+int net_udp_poll(int owner_pid, int socket_handle)
+{
+    UdpSocketState* s = udp_get_socket(owner_pid, socket_handle);
+    if (!s) return 32; /* POLLNVAL */
+    return (s->queue_count ? 1 : 0) | 4; /* readable when queued; writable while allocated */
+}
+
+uint32_t net_tcp_gen(int owner_pid, int socket_handle)
+{
+    TcpSocketState* s = tcp_get_socket(owner_pid, socket_handle);
+    return s ? s->generation : 0U;
+}
+
+uint32_t net_udp_gen(int owner_pid, int socket_handle)
+{
+    UdpSocketState* s = udp_get_socket(owner_pid, socket_handle);
+    return s ? s->generation : 0U;
+}
+
+int net_tcp_shutdown_wr(int owner_pid, int socket_handle)
+{
+    TcpSocketState* s = tcp_get_socket(owner_pid, socket_handle);
+    if (!s) return -9;
+    if (s->state != TCP_STATE_ESTABLISHED && s->state != TCP_STATE_CLOSE_WAIT)
+        return -107;
+    int rc = tcp_send_segment(s, TCP_FLAG_FIN | TCP_FLAG_ACK, s->snd_nxt,
+                              s->rcv_nxt, 0, 0);
+    if (rc == 0) { ++s->snd_nxt; s->state = TCP_STATE_FIN_WAIT; }
+    return rc;
+}
+
+int net_tcp_info(int owner_pid, int socket_handle, uint32_t* remote_ip,
+                 uint16_t* remote_port, uint16_t* local_port)
+{
+    TcpSocketState* s = tcp_get_socket(owner_pid, socket_handle);
+    if (!s) return -9;
+    if (remote_ip) *remote_ip = s->remote_ip;
+    if (remote_port) *remote_port = s->remote_port;
+    if (local_port) *local_port = s->local_port;
+    return 0;
+}
+
+int net_udp_local_port(int owner_pid, int socket_handle)
+{
+    UdpSocketState* s = udp_get_socket(owner_pid, socket_handle);
+    return s ? (int)s->local_port : -9;
+}
+
+int net_tcp_listen(int, int, uint16_t) { return -95; }
+int net_tcp_accept(int, int, uint32_t*, uint16_t*, uint32_t) { return -95; }
+
+int net_dhcp(uint32_t) { return -95; }
+int net_dhcp_renew(uint32_t) { return -95; }
+int net_dhcp_release() { return -95; }
+uint32_t net_dhcp_remaining() { return 0; }
+void net_dhcp_maintain() {}
+void net_dhcp_info(uint32_t* server, uint32_t* lease_seconds, int* bound)
+{
+    if (server) *server = 0;
+    if (lease_seconds) *lease_seconds = 0;
+    if (bound) *bound = 0;
+}
+
+/* IPv6 text handling is available, but the current x86 Ethernet path is IPv4-only. */
+int net_ip6_parse(const char*, uint8_t out[16])
+{
+    if (out) for (int i = 0; i < 16; ++i) out[i] = 0;
+    return -95;
+}
+void net_ip6_print(const uint8_t*) { uart_puts("IPv6 transport unavailable"); }
+void net_ip6_local(uint8_t out[16]) { if (out) for (int i = 0; i < 16; ++i) out[i] = 0; }
+int net_ping6(const uint8_t*, uint32_t) { return -95; }
+void net_ip6_stats(uint32_t* ns, uint32_t* na, uint32_t* echo)
+{
+    if (ns) *ns = 0; if (na) *na = 0; if (echo) *echo = 0;
+}
+int net_udp6_sendto(int, int, const uint8_t[16], uint16_t, const void*, uint32_t) { return -95; }
+int net_udp6_recvfrom(int, int, uint8_t[16], uint16_t*, void*, uint32_t, uint32_t) { return -95; }
+int net_tcp6_connect(int, int, const uint8_t[16], uint16_t, uint32_t) { return -95; }
+int net_tcp_peer6(int, int, uint8_t[16]) { return -95; }
